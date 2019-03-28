@@ -1,0 +1,15 @@
+[package]
+name = "deoptloader"
+version = "0.1.0"
+authors = ["Colin Snover <github.com@zetafleet.com>"]
+edition = "2018"
+
+[dependencies]
+bitflags = "*"
+byteorder = "*"
+nom = "*"
+safemem = "*"
+
+[[bin]]
+name = "deoptloader"
+path = "main.rs"
