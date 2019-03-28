@@ -64,7 +64,7 @@ struct NEHeader {
 	segment_thunk_offset:      u16,
 	min_code_swap_size:        u16,
 	win_version_minor:         u8,
-	win_version_major:         u8
+	win_version_major:         u8,
 }
 
 bitflags!(struct NESegmentFlags: u16 {
@@ -212,22 +212,22 @@ enum NESegmentRelocationSourceKind {
 	LoByte  = 0,
 	Segment = 2,
 	FarAddr = 3,
-	Offset  = 5
+	Offset  = 5,
 }
 
 #[derive(Clone, Debug)]
 enum NESegmentRelocationTarget {
 	InternalRef {
 		segment: u8,
-		offset: u16
+		offset:  u16,
 	},
 	ImportName {
 		module_index: u16,
-		name_offset: u16, // into imported names table
+		name_offset:  u16, // into imported names table
 	},
 	ImportOrdinal {
 		module_index: u16,
-		ordinal: u16,
+		ordinal:      u16,
 	},
 	OsFixup {
 		kind: u16,
@@ -289,12 +289,14 @@ named!(detect_optloader<String>,
 	)
 );
 
+const X86_MOV_SI: u8 = b'\xbe';
+const X86_MOV_DI: u8 = b'\xbf';
 named!(detect_offsets<(u16, u16)>,
 	do_parse!(
-		               take!(11) >> // TODO: figure out how to make take_until_and_consume use a byte array
-		               tag!(/* mov si, */ [b'\xbe']) >>
+		               take_until!(&[X86_MOV_SI][..]) >>
+		               tag!([X86_MOV_SI]) >>
 		source_offset: le_u16 >>
-		               tag!(/* mov di, */ [b'\xbf']) >>
+		               tag!([X86_MOV_DI]) >>
 		target_offset: le_u16 >>
 		((source_offset, target_offset))
 	)
