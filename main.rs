@@ -8,15 +8,15 @@ extern crate safemem;
 
 use nom::{le_u8, le_u16, le_u32};
 use std::io::prelude::*;
-use std::io::{Cursor, Error, ErrorKind};
+use std::io::{Error, ErrorKind};
 use std::fs::File;
 
 named!(get_ne_offset<u16>,
 	do_parse!(
-		tag!("MZ") >>
-		take!(58) >>
+		           tag!("MZ") >>
+		           take!(58) >>
 		ne_offset: le_u16 >>
-		( ne_offset )
+		(ne_offset)
 	)
 );
 
@@ -35,36 +35,36 @@ bitflags!(struct NEFlags: u16 {
 
 #[derive(Clone, Debug)]
 struct NEHeader {
-	linker_major_version: u8,
-	linker_minor_version: u8,
-	entry_table_offset: u16,
-	entry_table_length: u16,
-	crc: u32,
-	flags: NEFlags,
-	auto_data_segment_index: u16,
-	heap_size: u16,
-	stack_size: u16,
-	entry_point: u32,
-	init_stack_pointer: u32,
-	num_segments: u16,
-	num_modules: u16,
-	names_size: u16,
-	segment_table_offset: u16, // bytes, from start of NEHeader
-	resource_table_offset: u16,
-	names_table_offset: u16,
-	module_table_offset: u16,
+	linker_major_version:      u8,
+	linker_minor_version:      u8,
+	entry_table_offset:        u16,
+	entry_table_length:        u16,
+	crc:                       u32,
+	flags:                     NEFlags,
+	auto_data_segment_index:   u16,
+	heap_size:                 u16,
+	stack_size:                u16,
+	entry_point:               u32,
+	init_stack_pointer:        u32,
+	num_segments:              u16,
+	num_modules:               u16,
+	names_size:                u16,
+	segment_table_offset:      u16, // bytes, from start of NEHeader
+	resource_table_offset:     u16,
+	names_table_offset:        u16,
+	module_table_offset:       u16,
 	import_names_table_offset: u16,
 	non_resident_table_offset: u32,
-	num_movable_entry_point: u16,
-	alignment_shift_count: u16, // 1 << alignment_shift_count = logical sector
-	num_resources: u16,
-	target_os: u8,
-	os2_flags: u8,
-	thunk_offset: u16,
-	segment_thunk_offset: u16,
-	min_code_swap_size: u16,
-	win_version_minor: u8,
-	win_version_major: u8
+	num_movable_entry_point:   u16,
+	alignment_shift_count:     u16, // 1 << alignment_shift_count = logical sector
+	num_resources:             u16,
+	target_os:                 u8,
+	os2_flags:                 u8,
+	thunk_offset:              u16,
+	segment_thunk_offset:      u16,
+	min_code_swap_size:        u16,
+	win_version_minor:         u8,
+	win_version_major:         u8
 }
 
 bitflags!(struct NESegmentFlags: u16 {
@@ -78,37 +78,37 @@ bitflags!(struct NESegmentFlags: u16 {
 
 named!(read_ne_header<NEHeader>,
 	do_parse!(
-		tag!("NE") >>
-		linker_major_version: le_u8 >>
-		linker_minor_version: le_u8 >>
-		entry_table_offset: le_u16 >> // relative to beginning of header
-		entry_table_length: le_u16 >> // bytes
-		crc: le_u32 >>
-		flags: le_u16 >>
-		auto_data_segment_index: le_u16 >>
-		heap_size: le_u16 >>
-		stack_size: le_u16 >>
-		entry_point: le_u32 >> // cs:ip
-		init_stack_pointer: le_u32 >> // ss:sp
-		num_segments: le_u16 >>
-		num_modules: le_u16 >>
-		names_size: le_u16 >>
-		segment_table_offset: le_u16 >>
-		resource_table_offset: le_u16 >>
-		names_table_offset: le_u16 >>
-		module_table_offset: le_u16 >>
+		                           tag!("NE") >>
+		linker_major_version:      le_u8 >>
+		linker_minor_version:      le_u8 >>
+		entry_table_offset:        le_u16 >> // relative to beginning of header
+		entry_table_length:        le_u16 >> // bytes
+		crc:                       le_u32 >>
+		flags:                     le_u16 >>
+		auto_data_segment_index:   le_u16 >>
+		heap_size:                 le_u16 >>
+		stack_size:                le_u16 >>
+		entry_point:               le_u32 >> // cs:ip
+		init_stack_pointer:        le_u32 >> // ss:sp
+		num_segments:              le_u16 >>
+		num_modules:               le_u16 >>
+		names_size:                le_u16 >>
+		segment_table_offset:      le_u16 >>
+		resource_table_offset:     le_u16 >>
+		names_table_offset:        le_u16 >>
+		module_table_offset:       le_u16 >>
 		import_names_table_offset: le_u16 >>
 		non_resident_table_offset: le_u32 >>
-		num_movable_entry_point: le_u16 >>
-		alignment_shift_count: le_u16 >>
-		num_resources: le_u16 >>
-		target_os: le_u8 >>
-		os2_flags: le_u8 >>
-		thunk_offset: le_u16 >>
-		segment_thunk_offset: le_u16 >>
-		min_code_swap_size: le_u16 >>
-		win_version_minor: le_u8 >>
-		win_version_major: le_u8 >>
+		num_movable_entry_point:   le_u16 >>
+		alignment_shift_count:     le_u16 >>
+		num_resources:             le_u16 >>
+		target_os:                 le_u8 >>
+		os2_flags:                 le_u8 >>
+		thunk_offset:              le_u16 >>
+		segment_thunk_offset:      le_u16 >>
+		min_code_swap_size:        le_u16 >>
+		win_version_minor:         le_u8 >>
+		win_version_major:         le_u8 >>
 		(NEHeader {
 			linker_major_version,
 			linker_minor_version,
@@ -146,48 +146,50 @@ named!(read_ne_header<NEHeader>,
 
 #[derive(Clone, Debug)]
 struct NESegmentEntry {
-	offset: u16, // logical sector alignment offset from start of file
-	length: u16, // bytes, 0 means 64k
-	flags: NESegmentFlags,
-	min_allocation_size: u16, // bytes, 0 means 64k
+	offset:     u32, // bytes
+	length:     u32, // bytes
+	flags:      NESegmentFlags,
+	alloc_size: u32, // bytes
 }
 
-named!(get_segment_entry<NESegmentEntry>,
-	do_parse!(
-		offset: le_u16 >>
-		length: le_u16 >>
-		flags: le_u16 >>
-		min_allocation_size: le_u16 >>
-		(NESegmentEntry {
-			offset,
-			length,
-			flags: NESegmentFlags::from_bits_truncate(flags),
-			min_allocation_size
-		})
+named_args!(get_segments(offset_shift: u16, num_segments: u16)<Vec<NESegmentEntry> >,
+	count!(
+		do_parse!(
+			offset:     le_u16 >>
+			length:     le_u16 >>
+			flags:      le_u16 >>
+			alloc_size: le_u16 >>
+			(NESegmentEntry {
+				offset:     (offset as u32) << offset_shift,
+				length:     if length == 0 { 0x10000 } else { length.into() },
+				flags:      NESegmentFlags::from_bits_truncate(flags),
+				alloc_size: if alloc_size == 0 { 0x10000 } else { alloc_size.into() }
+			})
+		), num_segments as usize
 	)
 );
 
 #[derive(Clone, Debug)]
 struct NESelfLoadHeader {
-	boot_app_offset: u32,
-	load_app_seg_offset: u32,
+	boot_app_offset:       u32,
+	load_app_seg_offset:   u32,
 	optloader_code_length: u16,
 }
 
 named!(read_selfload_header<NESelfLoadHeader>,
 	do_parse!(
-		tag!("A0") >>
-		le_u16 >> // reserved
-		boot_app_offset: le_u32 >>
-		load_app_seg_offset: le_u32 >>
-		le_u32 >> // reserved
-		le_u32 >> // mem alloc
-		le_u32 >> // ordinal resolve
-		le_u32 >> // exit
-		count!(le_u16, 4) >> // reserved
-		le_u32 >> // set owner
-		le_u32 >> // ALLOCSTODSALIAS
-		le_u16 >> // __AHINCR
+		                       tag!("A0") >>
+		                       le_u16 >> // reserved
+		boot_app_offset:       le_u32 >>
+		load_app_seg_offset:   le_u32 >>
+		                       le_u32 >> // reserved
+		                       le_u32 >> // mem alloc
+		                       le_u32 >> // ordinal resolve
+		                       le_u32 >> // exit
+		                       count!(le_u16, 4) >> // reserved
+		                       le_u32 >> // set owner
+		                       le_u32 >> // ALLOCSTODSALIAS
+		                       le_u16 >> // __AHINCR
 		optloader_code_length: le_u16 >>
 		(NESelfLoadHeader {
 			boot_app_offset,
@@ -200,7 +202,7 @@ named!(read_selfload_header<NESelfLoadHeader>,
 named!(read_pascal_string<String>,
 	do_parse!(
 		length: le_u8 >>
-		data: take!(length) >>
+		data:   take!(length) >>
 		(String::from_utf8_lossy(data).to_string())
 	)
 );
@@ -234,19 +236,19 @@ enum NESegmentRelocationTarget {
 
 #[derive(Clone, Debug)]
 struct NESegmentRelocation {
-	kind: NESegmentRelocationSourceKind,
-	offset: u16,
+	kind:     NESegmentRelocationSourceKind,
+	offset:   u16,
 	additive: bool,
-	target: NESegmentRelocationTarget,
+	target:   NESegmentRelocationTarget,
 }
 
 named!(read_relocation<NESegmentRelocation>,
 	do_parse!(
-		kind: le_u8 >>
-		flags: le_u8 >>
+		kind:   le_u8 >>
+		flags:  le_u8 >>
 		offset: le_u16 >>
-		data1: le_u16 >> // TODO: wrong for ADDITIVE flag
-		data2: le_u16 >>
+		data1:  le_u16 >> // TODO: wrong for ADDITIVE flag
+		data2:  le_u16 >>
 		(NESegmentRelocation {
 			kind: match kind {
 				0 => NESegmentRelocationSourceKind::LoByte,
@@ -281,7 +283,7 @@ named!(read_relocation<NESegmentRelocation>,
 
 named!(detect_optloader<String>,
 	do_parse!(
-		take_until!("OPTLOADER") >>
+		      take_until!("OPTLOADER") >>
 		text: take_until_and_consume!("\0") >>
 		(String::from_utf8_lossy(text).to_string())
 	)
@@ -289,29 +291,24 @@ named!(detect_optloader<String>,
 
 named!(detect_offsets<(u16, u16)>,
 	do_parse!(
-		take!(11) >> // TODO: figure out how to make take_until_and_consume use a byte array
-		tag!(/* mov si, */ [b'\xbe']) >>
+		               take!(11) >> // TODO: figure out how to make take_until_and_consume use a byte array
+		               tag!(/* mov si, */ [b'\xbe']) >>
 		source_offset: le_u16 >>
-		tag!(/* mov di, */ [b'\xbf']) >>
+		               tag!(/* mov di, */ [b'\xbf']) >>
 		target_offset: le_u16 >>
 		((source_offset, target_offset))
 	)
 );
 
-fn read_relocations(mut data: &[u8]) -> Result<Vec<NESegmentRelocation>, nom::Err<&[u8]>> {
-	let ret = le_u16(data)?;
-	data = ret.0;
-	let count = ret.1;
-	let mut relocations: Vec<NESegmentRelocation> = Vec::with_capacity(count as usize);
-	for _ in 0..count {
-		let ret = read_relocation(&data)?;
-		data = ret.0;
-		relocations.push(ret.1);
-	}
-	Ok(relocations)
-}
+named!(read_relocations<Vec<NESegmentRelocation> >,
+	do_parse!(
+		length: le_u16 >>
+		relocations: count!(call!(read_relocation), length as usize) >>
+		(relocations)
+	)
+);
 
-fn decrypt_load_app_seg(cseg0: &mut [u8], source_offset: u16, target_offset: u16) {
+fn unpack_load_app_seg(cseg0: &mut [u8], source_offset: u16, target_offset: u16) {
 	// bytes are LSB first, bits MSB first, read in blocks of 2 bytes
 
 	// 1 -> *(u8*)di++ = *(u8*)si++; continue;
@@ -381,15 +378,13 @@ fn fix_file(filename: &str) -> Result<(), Error> {
 		}
 	};
 
-	let mut ne_segments: Vec<NESegmentEntry> = Vec::with_capacity(ne_header.num_segments as usize);
-
-	let mut ne_segment_table = &ne_executable[ne_header.segment_table_offset as usize..];
-	for _ in 0..ne_header.num_segments {
-		let (remainder, mut entry) = get_segment_entry(&ne_segment_table).unwrap();
-		entry.offset <<= ne_header.alignment_shift_count;
-		ne_segments.push(entry);
-		ne_segment_table = remainder;
-	}
+	let ne_segment_table = &ne_executable[ne_header.segment_table_offset as usize..];
+	let ne_segments = match get_segments(&ne_segment_table, ne_header.alignment_shift_count, ne_header.num_segments) {
+		Ok((_, segments)) => segments,
+		Err(_) => {
+			return Err(Error::new(ErrorKind::InvalidData, "Invalid segment table"));
+		}
+	};
 
 	let cseg0_header = &ne_segments[0];
 	let cseg0 = &mut executable[cseg0_header.offset as usize..];
@@ -405,10 +400,12 @@ fn fix_file(filename: &str) -> Result<(), Error> {
 
 	// println!("{:?}", ne_selfload_header);
 
+	// TODO: Discard this if it actually is not necessary for fixing up the
+	// executable
 	if cseg0_header.flags.contains(NESegmentFlags::HAS_RELOC) {
 		let cseg0_reloc = &cseg0[cseg0_header.length as usize..];
-		let relocations = match read_relocations(&cseg0_reloc) {
-			Ok(relocations) => relocations,
+		let _relocations = match read_relocations(&cseg0_reloc) {
+			Ok((_, relocations)) => relocations,
 			Err(_) => {
 				return Err(Error::new(ErrorKind::InvalidData, "Failed to read relocation table"));
 			}
@@ -439,9 +436,9 @@ fn fix_file(filename: &str) -> Result<(), Error> {
 
 	safemem::copy_over(cseg0, copy_from.into(), copy_to.into(), ne_selfload_header.optloader_code_length.into());
 
-	decrypt_load_app_seg(cseg0, (ne_selfload_header.load_app_seg_offset & 0xffff) as u16, copy_to + 1);
+	unpack_load_app_seg(cseg0, (ne_selfload_header.load_app_seg_offset & 0xffff) as u16, copy_to + 1);
 
-	std::fs::write(String::from(filename) + ".out", &executable)?;
+	// std::fs::write(String::from(filename) + ".out", &executable)?;
 
 	Ok(())
 }
