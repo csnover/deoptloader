@@ -3,10 +3,15 @@
 #[macro_use]
 extern crate bitflags;
 #[macro_use]
+extern crate enum_primitive;
+extern crate num;
+#[macro_use]
 extern crate nom;
 extern crate safemem;
 
+use byteorder::{ByteOrder, LittleEndian as LE};
 use nom::{le_u8, le_u16, le_u32};
+use num::FromPrimitive;
 use std::io::prelude::*;
 use std::io::{Error, ErrorKind};
 use std::fs::File;
@@ -146,10 +151,10 @@ named!(read_ne_header<NEHeader>,
 
 #[derive(Clone, Debug)]
 struct NESegmentEntry {
-	offset:     u32, // bytes
-	length:     u32, // bytes
-	flags:      NESegmentFlags,
-	alloc_size: u32, // bytes
+	offset:        u32, // bytes
+	length:        u32, // bytes
+	flags:         NESegmentFlags,
+	alloc_size:    u32, // bytes
 }
 
 named_args!(get_segments(offset_shift: u16, num_segments: u16)<Vec<NESegmentEntry> >,
@@ -160,14 +165,135 @@ named_args!(get_segments(offset_shift: u16, num_segments: u16)<Vec<NESegmentEntr
 			flags:      le_u16 >>
 			alloc_size: le_u16 >>
 			(NESegmentEntry {
-				offset:     (offset as u32) << offset_shift,
-				length:     if length == 0 { 0x10000 } else { length.into() },
-				flags:      NESegmentFlags::from_bits_truncate(flags),
-				alloc_size: if alloc_size == 0 { 0x10000 } else { alloc_size.into() }
+				offset:        (offset as u32) << offset_shift,
+				length:        if length == 0 { 0x10000 } else { length.into() },
+				flags:         NESegmentFlags::from_bits_truncate(flags),
+				alloc_size:    if alloc_size == 0 { 0x10000 } else { alloc_size.into() }
 			})
 		), num_segments as usize
 	)
 );
+
+bitflags!(struct NEResourceFlags: u16 {
+	const MOVEABLE = 0x10;
+	const PURE     = 0x20;
+	const PRELOAD  = 0x40;
+});
+
+enum_from_primitive! {
+	#[derive(Clone, Debug)]
+	enum NEPredefinedResourceKind {
+		Cursor           = 1,
+		Bitmap           = 2,
+		Icon             = 3,
+		Menu             = 4,
+		Dialog           = 5,
+		StringTable      = 6,
+		FontDirectory    = 7,
+		FontResource     = 8,
+		AcceleratorTable = 9,
+		RawData          = 10,
+		MessageTable     = 11,
+		GroupCursor      = 12,
+		GroupIcon        = 14,
+		Version          = 16,
+		DlgInclude       = 17,
+		PlugPlay         = 19,
+		VXD              = 20,
+		AnimatedCursor   = 21,
+		AnimatedIcon     = 22,
+		HTML             = 23,
+		Manifest         = 24,
+	}
+}
+
+#[derive(Clone, Debug)]
+enum NEResourceKind {
+	Predefined(NEPredefinedResourceKind),
+	Integer(u16),
+	String(String),
+}
+
+#[derive(Clone, Debug)]
+enum NEResourceId {
+	Integer(u16),
+	String(String),
+}
+
+#[derive(Clone, Debug)]
+struct NEResourceEntry {
+	offset: u32, // bytes
+	length: u32, // bytes
+	flags:  NEResourceFlags,
+	id:     NEResourceId,
+}
+
+#[derive(Clone, Debug)]
+struct NEResourceKindEntry {
+	kind:      NEResourceKind,
+	resources: Vec<NEResourceEntry>,
+}
+
+#[derive(Clone, Debug)]
+struct NEResourceTable {
+	alignment_shift_count: u16,
+	resource_kinds: Vec<NEResourceKindEntry>,
+}
+
+fn convert_resource_kind(resource_table: &[u8], kind: u16) -> NEResourceKind {
+	if kind & 0x8000 == 0x8000 {
+		match NEPredefinedResourceKind::from_u16(kind & 0x7fff) {
+			Some(kind) => NEResourceKind::Predefined(kind),
+			None => NEResourceKind::Integer(kind & 0x7fff)
+		}
+	} else {
+		NEResourceKind::String(read_pascal_string(&resource_table[kind as usize..]).unwrap().1)
+	}
+}
+
+named_args!(read_resource<'a>(resource_table: &'a [u8], offset_shift: u16)<NEResourceEntry>,
+	do_parse!(
+		offset:        le_u16 >> // in sectors
+		length:        le_u16 >> // in sectors
+		flags:         le_u16 >>
+		id:            le_u16 >>
+		/* reserved */ le_u32 >>
+		(NEResourceEntry {
+			offset: (offset as u32) << offset_shift,
+			length: (length as u32) << offset_shift,
+			flags: NEResourceFlags::from_bits_truncate(flags),
+			id: if id & 0x8000 == 0x8000 {
+				NEResourceId::Integer(id & 0x7fff)
+			} else {
+				NEResourceId::String(read_pascal_string(&resource_table[id as usize..]).unwrap().1)
+			}
+		})
+	)
+);
+
+named_args!(read_resource_kind<'a>(resource_table: &'a [u8], offset_shift: u16)<NEResourceKindEntry>,
+	do_parse!(
+		kind:          le_u16 >>
+		num_resources: le_u16 >>
+		/* reserved */ take!(4) >>
+		resources:     count!(apply!(read_resource, resource_table, offset_shift), num_resources as usize) >>
+		(NEResourceKindEntry {
+			kind: convert_resource_kind(resource_table, kind),
+			resources
+		})
+	)
+);
+
+fn get_resource_table(input: &[u8]) -> nom::IResult<&[u8], NEResourceTable> {
+	do_parse!(input,
+		alignment_shift_count: le_u16 >>
+		resource_kinds:        many_till!(apply!(read_resource_kind, input, alignment_shift_count), tag!("\0\0")) >>
+		(NEResourceTable {
+			alignment_shift_count,
+			resource_kinds: resource_kinds.0
+		})
+	)
+}
 
 #[derive(Clone, Debug)]
 struct NESelfLoadHeader {
@@ -188,6 +314,7 @@ named!(read_selfload_header<NESelfLoadHeader>,
 		                       le_u32 >> // exit
 		                       count!(le_u16, 4) >> // reserved
 		                       le_u32 >> // set owner
+		// these next fields are optloader-specific
 		                       le_u32 >> // ALLOCSTODSALIAS
 		                       le_u16 >> // __AHINCR
 		optloader_code_length: le_u16 >>
@@ -207,12 +334,14 @@ named!(read_pascal_string<String>,
 	)
 );
 
-#[derive(Clone, Debug)]
-enum NESegmentRelocationSourceKind {
-	LoByte  = 0,
-	Segment = 2,
-	FarAddr = 3,
-	Offset  = 5,
+enum_from_primitive! {
+	#[derive(Clone, Debug)]
+	enum NESegmentRelocationSourceKind {
+		LoByte  = 0,
+		Segment = 2,
+		FarAddr = 3,
+		Offset  = 5,
+	}
 }
 
 #[derive(Clone, Debug)]
@@ -250,13 +379,7 @@ named!(read_relocation<NESegmentRelocation>,
 		data1:  le_u16 >> // TODO: wrong for ADDITIVE flag
 		data2:  le_u16 >>
 		(NESegmentRelocation {
-			kind: match kind {
-				0 => NESegmentRelocationSourceKind::LoByte,
-				2 => NESegmentRelocationSourceKind::Segment,
-				3 => NESegmentRelocationSourceKind::FarAddr,
-				5 => NESegmentRelocationSourceKind::Offset,
-				_ => { panic!("Unknown relocation type {}", kind); }
-			},
+			kind: NESegmentRelocationSourceKind::from_u8(kind).expect(&format!("Unknown relocation type {}", kind)),
 			offset,
 			additive: (flags & 4) == 4,
 			target: match flags & 3 {
@@ -304,7 +427,7 @@ named!(detect_offsets<(u16, u16)>,
 
 named!(read_relocations<Vec<NESegmentRelocation> >,
 	do_parse!(
-		length: le_u16 >>
+		length:      le_u16 >>
 		relocations: count!(call!(read_relocation), length as usize) >>
 		(relocations)
 	)
@@ -343,76 +466,76 @@ fn unpack_load_app_seg(cseg0: &mut [u8], source_offset: u16, target_offset: u16)
 	// si = ax;
 }
 
-fn fix_file(filename: &str) -> Result<(), Error> {
-	let mut file = File::open(&filename)?;
-	let mut executable: Vec<u8> = Vec::with_capacity(file.metadata()?.len() as usize);
-	file.read_to_end(&mut executable)?;
+macro_rules! err (
+	($reason: expr) => (
+		return Err(Error::new(ErrorKind::InvalidData, $reason));
+	)
+);
 
-	let ne_offset = match get_ne_offset(&executable) {
-		Ok((_, offset)) => {
-			assert!((offset as usize) < executable.len());
-			offset
-		},
-		Err(_) => {
-			return Err(Error::new(ErrorKind::InvalidData, "Not a valid MZ executable"));
-		}
+macro_rules! try_parse (
+	($result: expr, $reason: expr) => (match $result {
+		Ok((_, result)) => result,
+		Err(_) => { err!($reason) }
+	})
+);
+
+fn fix_file(in_filename: &str, out_filename: &str) -> Result<(), Error> {
+	let input = {
+		let mut file = File::open(&in_filename)?;
+		let mut input: Vec<u8> = Vec::with_capacity(file.metadata()?.len() as usize);
+		file.read_to_end(&mut input)?;
+		input
 	};
 
-	let ne_executable = &executable[ne_offset as usize..];
+	let ne_offset = try_parse!(get_ne_offset(&input), "Not an MZ executable");
+	let ne_executable = &input[ne_offset as usize..];
 
-	let ne_header = match read_ne_header(&ne_executable) {
-		Ok((_, header)) => header,
-		Err(_) => {
-			return Err(Error::new(ErrorKind::InvalidData, "Not a valid NE executable"));
-		}
-	};
+	let ne_header = try_parse!(read_ne_header(&ne_executable), "Not an NE executable");
 
 	if !ne_header.flags.contains(NEFlags::SELF_LOAD) {
 		return Err(Error::new(ErrorKind::InvalidData, "Not a self-loading executable"));
 	}
 
-	// println!("{:?}", ne_header);
+	println!("{:#?}", ne_header);
 
-	let module_name = match read_pascal_string(&executable[(ne_header.non_resident_table_offset as usize)..]) {
-		Ok((_, name)) => name,
-		Err(_) => {
-			return Err(Error::new(ErrorKind::InvalidData, "Invalid executable name"));
-		}
+	let module_name = {
+		let ne_non_resident_table = &input[(ne_header.non_resident_table_offset as usize)..];
+		try_parse!(read_pascal_string(&ne_non_resident_table), "Invalid executable name")
 	};
 
-	let ne_segment_table = &ne_executable[ne_header.segment_table_offset as usize..];
-	let ne_segments = match get_segments(&ne_segment_table, ne_header.alignment_shift_count, ne_header.num_segments) {
-		Ok((_, segments)) => segments,
-		Err(_) => {
-			return Err(Error::new(ErrorKind::InvalidData, "Invalid segment table"));
-		}
+	let segments = {
+		let ne_segment_table = &ne_executable[ne_header.segment_table_offset as usize..];
+		try_parse!(get_segments(
+			&ne_segment_table,
+			ne_header.alignment_shift_count,
+			ne_header.num_segments
+		), "Invalid segment table")
 	};
 
-	let cseg0_header = &ne_segments[0];
-	let cseg0 = &mut executable[cseg0_header.offset as usize..];
+	println!("{:#?}", &segments);
 
-	// println!("{:?}", cseg0_header);
-
-	let ne_selfload_header = match read_selfload_header(&cseg0) {
-		Ok((_, header)) => header,
-		Err(_) => {
-			return Err(Error::new(ErrorKind::InvalidData, "Invalid self-loading executable header"));
-		}
+	let resource_table = {
+		let ne_resource_table = &ne_executable[ne_header.resource_table_offset as usize..];
+		try_parse!(get_resource_table(&ne_resource_table), "Invalid resource table")
 	};
 
-	// println!("{:?}", ne_selfload_header);
+	println!("{:#?}", &resource_table);
+
+	let cseg0_header = &segments[0];
+	let cseg0 = &input[cseg0_header.offset as usize..];
+
+	// println!("{:#?}", cseg0_header);
+
+	let ne_selfload_header = try_parse!(read_selfload_header(&cseg0), "Invalid self-loading executable header");
+
+	// println!("{:#?}", ne_selfload_header);
 
 	// TODO: Discard this if it actually is not necessary for fixing up the
 	// executable
 	if cseg0_header.flags.contains(NESegmentFlags::HAS_RELOC) {
 		let cseg0_reloc = &cseg0[cseg0_header.length as usize..];
-		let _relocations = match read_relocations(&cseg0_reloc) {
-			Ok((_, relocations)) => relocations,
-			Err(_) => {
-				return Err(Error::new(ErrorKind::InvalidData, "Failed to read relocation table"));
-			}
-		};
-		// println!("{:?}", relocations);
+		let _relocations = try_parse!(read_relocations(&cseg0_reloc), "Failed to read relocation table");
+		// println!("{:#?}", relocations);
 	}
 
 	let boot_app = &cseg0[(ne_selfload_header.boot_app_offset & 0xff) as usize..];
@@ -422,23 +545,50 @@ fn fix_file(filename: &str) -> Result<(), Error> {
 			println!("Found {}", copyright);
 			bytecode
 		},
-		Err(_) => {
-			return Err(Error::new(ErrorKind::InvalidData, "Failed to find Optloader copyright"));
-		}
+		Err(_) => err!("Failed to find Optloader copyright")
 	};
 
 	println!("Unpacking {}", module_name);
 
-	let (copy_from, copy_to) = match detect_offsets(&offsets_bytecode) {
-		Ok((_, offsets)) => (offsets.0, offsets.1 - ne_selfload_header.optloader_code_length),
-		Err(_) => {
-			return Err(Error::new(ErrorKind::InvalidData, "Failed to find code offsets"));
-		}
+	let (copy_from, copy_to) = {
+		let offsets = try_parse!(detect_offsets(&offsets_bytecode), "Failed to find code offsets");
+		(offsets.0, offsets.1 - ne_selfload_header.optloader_code_length)
 	};
 
-	safemem::copy_over(cseg0, copy_from.into(), copy_to.into(), ne_selfload_header.optloader_code_length.into());
+	// copy executable headers
+	let mut out: Vec<u8> = Vec::new();
+	out.extend(&input[0..segments[0].offset as usize]);
 
-	unpack_load_app_seg(cseg0, (ne_selfload_header.load_app_seg_offset & 0xffff) as u16, copy_to + 1);
+	// rewrite segment table
+	{
+
+	}
+
+	// rewrite_segment_table(&mut out[(ne_offset + ne_header.segment_table_offset) as usize..]);
+	// rewrite_resource_table(&mut out[(ne_offset + ne_header.resource_table_offset) as usize..]);
+
+	// {
+	// 	const LENGTH_FIELD: usize = 2;
+	// 	const ENTRY_SIZE: usize = 8;
+	// 	let mut out_segment_table = ;
+	// 	LE::write_u16(&mut out_segment_table[LENGTH_FIELD..], segments[0].alloc_size as u16);
+	// 	out_segment_table = &mut out_segment_table[ENTRY_SIZE..];
+	// }
+
+	// TODO:
+	// - Copy over headers
+	// - Clear selfload flag
+	// - Rewrite segment table
+	// - Rewrite resource table
+	// - For each segment:
+	//   - Decompress code into new code segment
+	//   - Copy reloc trailer, if it exists
+	//   - Add alignment padding
+	// - Copy executable trailer data
+	// - Rewrite offset to trailer data
+
+	//safemem::copy_over(cseg0, copy_from.into(), copy_to.into(), ne_selfload_header.optloader_code_length.into());
+	//unpack_load_app_seg(cseg0, (ne_selfload_header.load_app_seg_offset & 0xffff) as u16, copy_to + 1);
 
 	// std::fs::write(String::from(filename) + ".out", &executable)?;
 
@@ -446,11 +596,22 @@ fn fix_file(filename: &str) -> Result<(), Error> {
 }
 
 fn main() {
-	let args: Vec<_> = std::env::args().collect();
-	if args.len() < 2 {
-		println!("Usage: {} <packed executable>", args[0]);
-		return;
-	}
+	let (in_filename, out_filename) = {
+		let args: Vec<_> = std::env::args().collect();
+		if args.len() < 2 {
+			println!("Usage: {} <packed executable> [<output filename>]", &args[0]);
+			std::process::exit(1);
+		}
 
-	fix_file(&args[1]).unwrap();
+		let out_file = if args.len() > 2 { args[2].clone() } else { args[1].clone() + ".out" };
+		(args[1].clone(), out_file)
+	};
+
+	match fix_file(&in_filename, &out_filename) {
+		Ok(_) => { println!("Successfully unpacked {} to {}", &in_filename, &out_filename); },
+		Err(e) => {
+			println!("Failed to unpack {}: {}", &in_filename, &e);
+			std::process::exit(1);
+		}
+	};
 }
