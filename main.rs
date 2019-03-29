@@ -83,19 +83,19 @@ bitflags!(struct NESegmentFlags: u16 {
 
 named!(read_ne_header<NEHeader>,
 	do_parse!(
-		                           tag!("NE") >>
-		linker_major_version:      le_u8 >>
-		linker_minor_version:      le_u8 >>
-		entry_table_offset:        le_u16 >> // relative to beginning of header
-		entry_table_length:        le_u16 >> // bytes
-		crc:                       le_u32 >>
-		flags:                     le_u16 >>
-		auto_data_segment_index:   le_u16 >>
-		heap_size:                 le_u16 >>
-		stack_size:                le_u16 >>
-		entry_point:               le_u32 >> // cs:ip
-		init_stack_pointer:        le_u32 >> // ss:sp
-		num_segments:              le_u16 >>
+/*0*/	                           tag!("NE") >>
+/*2*/	linker_major_version:      le_u8 >>
+/*3*/	linker_minor_version:      le_u8 >>
+/*4*/	entry_table_offset:        le_u16 >> // relative to beginning of header
+/*6*/	entry_table_length:        le_u16 >> // bytes
+/*8*/	crc:                       le_u32 >>
+/*12*/	flags:                     le_u16 >>
+/*14*/	auto_data_segment_index:   le_u16 >>
+/*16*/	heap_size:                 le_u16 >>
+/*18*/	stack_size:                le_u16 >>
+/*20*/	entry_point:               le_u32 >> // cs:ip
+/*24*/	init_stack_pointer:        le_u32 >> // ss:sp
+/*28*/	num_segments:              le_u16 >>
 		num_modules:               le_u16 >>
 		names_size:                le_u16 >>
 		segment_table_offset:      le_u16 >>
@@ -412,16 +412,32 @@ named!(detect_optloader<String>,
 	)
 );
 
+#[derive(Debug)]
+struct OptOffsets {
+	copy_from_offset: u16,
+	copy_to_offset: u16,
+	copy_length: u16,
+	decompress_from_offset: u16,
+	decompress_to_offset: u16,
+}
+
 const X86_MOV_SI: u8 = b'\xbe';
 const X86_MOV_DI: u8 = b'\xbf';
-named!(detect_offsets<(u16, u16)>,
+named_args!(get_offsets(code_size: u16)<OptOffsets>,
 	do_parse!(
-		               take_until!(&[X86_MOV_SI][..]) >>
-		               tag!([X86_MOV_SI]) >>
-		source_offset: le_u16 >>
-		               tag!([X86_MOV_DI]) >>
-		target_offset: le_u16 >>
-		((source_offset, target_offset))
+		                      take_until_and_consume!(&[X86_MOV_SI][..]) >>
+		copy_from_offset:     le_u16 >>
+		                      tag!([X86_MOV_DI]) >>
+		copy_to_offset_end:   le_u16 >>
+		                      take_until_and_consume!(&[X86_MOV_DI][..]) >>
+		decompress_to_offset: le_u16 >>
+		(OptOffsets {
+			copy_from_offset,
+			copy_to_offset: copy_to_offset_end - code_size,
+			copy_length: code_size,
+			decompress_from_offset: copy_to_offset_end - code_size + 1,
+			decompress_to_offset
+		})
 	)
 );
 
@@ -433,37 +449,208 @@ named!(read_relocations<Vec<NESegmentRelocation> >,
 	)
 );
 
-fn unpack_load_app_seg(cseg0: &mut [u8], source_offset: u16, target_offset: u16) {
-	// bytes are LSB first, bits MSB first, read in blocks of 2 bytes
+#[derive(Debug)]
+enum Op {
+	Literal(u8),
+	CopyBytes { count: u8, offset: u16 },
+	Terminate,
+	Noop
+}
 
-	// 1 -> *(u8*)di++ = *(u8*)si++; continue;
-	// 000 -> offset = 0, count = 2, WRITE
-	// 001 -> count = 3, FIND_OFFSET
-	// 0100 -> count = 4, FIND_OFFSET
-	// 0101 -> count = 5, FIND_OFFSET
-	// 01100 -> count = 6, FIND_OFFSET
-	// 01101 -> count = 7, FIND_OFFSET
-	// 01110 -> count = 8 + read_bits(2), FIND_OFFSET
-	// 011110 -> count = 12 + read_bits(3), FIND_OFFSET
-	// 011111 -> count = *(u8*)si++; if (count < 0x81) go FIND_OFFSET; else if (count != 0x81) break; else continue;
+struct Decompressor<'a> {
+	data: &'a[u8],
+	instructions: u16,
+	count: u8,
+}
 
-	// FIND_OFFSET
-	// 00 -> offset = 0, WRITE
-	// 010 -> offset = 1, WRITE
-	// 011 -> offset = 2 + read_bits(1), WRITE
-	// 100 -> offset = 4 + read_bits(2), WRITE
-	// 101 -> offset = 8 + read_bits(3), WRITE
-	// 110 -> offset = 16 + read_bits(4), WRITE
-	// 1110 -> offset = 32 + read_bits(4), WRITE
-	// 11110 -> offset = 48 + read_bits(4), WRITE
-	// 11111 -> offset = 64 + read_bits(6), WRITE
+impl<'a> Decompressor<'a> {
+	pub fn new(data: &'a [u8]) -> Result<Decompressor, Error> {
+		let mut decompressor = Decompressor { data, instructions: 0, count: 0 };
+		decompressor.fetch_instructions()?;
+		Ok(decompressor)
+	}
 
-	// WRITE
+	#[inline]
+	fn fetch_instructions(&mut self) -> Result<(), Error> {
+		if self.data.len() < 2 {
+			return Err(Error::new(ErrorKind::UnexpectedEof, "Ran out of instruction bits before end of stream"));
+		}
+
+		self.instructions = LE::read_u16(&self.data);
+		self.data = &self.data[2..];
+		self.count = 16;
+		Ok(())
+	}
+
+	#[inline]
+	fn get_bit(&mut self) -> Result<u8, Error> {
+		let (instructions, bit) = self.instructions.overflowing_add(self.instructions);
+		self.instructions = instructions;
+		self.count -= 1;
+		if self.count == 0 {
+			self.fetch_instructions()?;
+		}
+		Ok(bit as u8)
+	}
+
+	#[inline]
+	fn get_bits(&mut self, mut count: u8) -> Result<u8, Error> {
+		let mut value: u8 = self.get_bit()?;
+		count -= 1;
+		while count != 0 {
+			value = (value << 1) | self.get_bit()?;
+			count -= 1;
+		}
+		Ok(value)
+	}
+
+	#[inline]
+	fn get_byte(&mut self) -> Result<u8, Error> {
+		if self.data.len() == 0 {
+			return Err(Error::new(ErrorKind::UnexpectedEof, "Ran out of data bytes before end of stream"))
+		}
+		let byte = self.data[0];
+		self.data = &self.data[1..];
+		Ok(byte)
+	}
+
+	fn get_offset(&mut self) -> Result<u16, Error> {
+		// FIND_OFFSET
+		// 00 -> offset = 0, WRITE
+		// 010 -> offset = 1, WRITE
+		// 011 -> offset = 2 + read_bits(1), WRITE
+		// 100 -> offset = 4 + read_bits(2), WRITE
+		// 101 -> offset = 8 + read_bits(3), WRITE
+		// 110 -> offset = 16 + read_bits(4), WRITE
+		// 1110 -> offset = 32 + read_bits(4), WRITE
+		// 11110 -> offset = 48 + read_bits(4), WRITE
+		// 11111 -> offset = 64 + read_bits(6), WRITE
+
+		// WRITE
+		// offset = (offset << 8) | *(u8*)si++;
+		// ax = si;
+		// si = di-offset-1;
+		// while (count--) *(u8*)di++ = *(u8*)si++;
+		// si = ax;
+
+		Ok(((match self.get_bits(2)? {
+			0b00 => 0,
+			0b01 => match self.get_bit()? {
+				0 => 1,
+				1 => 2 + self.get_bit()?,
+				_ => unreachable!()
+			},
+			0b10 => match self.get_bit()? {
+				0 => 4 + self.get_bits(2)?,
+				1 => 8 + self.get_bits(3)?,
+				_ => unreachable!()
+			},
+			0b11 => match self.get_bit()? {
+				0 => 16 + self.get_bits(4)?,
+				1 => match self.get_bit()? {
+					0 => 32 + self.get_bits(4)?,
+					1 => match self.get_bit()? {
+						0 => 48 + self.get_bits(4)?,
+						1 => 64 + self.get_bits(6)?,
+						_ => unreachable!()
+					},
+					_ => unreachable!()
+				},
+				_ => unreachable!()
+			},
+			_ => unreachable!()
+		} as u16) << 8) + self.get_byte()? as u16)
+	}
+
+	pub fn next_op(&mut self) -> Result<Op, Error> {
+		// 1 -> *(u8*)di++ = *(u8*)si++; continue;
+		// 000 -> offset = 0, count = 2, WRITE
+		// 001 -> count = 3, FIND_OFFSET
+		// 0100 -> count = 4, FIND_OFFSET
+		// 0101 -> count = 5, FIND_OFFSET
+		// 01100 -> count = 6, FIND_OFFSET
+		// 01101 -> count = 7, FIND_OFFSET
+		// 01110 -> count = 8 + read_bits(2), FIND_OFFSET
+		// 011110 -> count = 12 + read_bits(3), FIND_OFFSET
+		// 011111 -> count = *(u8*)si++; if (count < 0x81) go FIND_OFFSET; else if (count != 0x81) break; else continue;
+		Ok(match self.get_bit()? {
+			0 => match self.get_bits(2)? {
+				0b00 => Op::CopyBytes{ count: 2, offset: self.get_byte()? as u16 },
+				0b01 => Op::CopyBytes{ count: 3, offset: self.get_offset()? },
+				0b10 => Op::CopyBytes{ count: 4 + self.get_bit()?, offset: self.get_offset()? },
+				0b11 => match self.get_bit()? {
+					0 => Op::CopyBytes{ count: 6 + self.get_bit()?, offset: self.get_offset()? },
+					1 => match self.get_bit()? {
+						0 => Op::CopyBytes{ count: 8 + self.get_bits(2)?, offset: self.get_offset()? },
+						1 => match self.get_bit()? {
+							0 => Op::CopyBytes{ count: 12 + self.get_bits(3)?, offset: self.get_offset()? },
+							1 => {
+								let count = self.get_byte()?;
+								if count < 0x81 {
+									return Ok(Op::CopyBytes{ count: count, offset: self.get_offset()? });
+								} else if count != 0x81 {
+									return Ok(Op::Terminate);
+								} else {
+									return Ok(Op::Noop);
+								}
+							},
+							_ => unreachable!()
+						},
+						_ => unreachable!()
+					},
+					_ => unreachable!()
+				},
+				_ => unreachable!()
+			},
+			1 => Op::Literal(self.get_byte()?),
+			_ => unreachable!()
+		})
+	}
+}
+
+fn unpack_load_app_seg(output: &mut [u8], offsets: OptOffsets) -> Result<usize, Error> {
+	// TODO: Instead of creating a duplicate copy of the input data, look for
+	// negative offsets when doing CopyBytes and translate them into the correct
+	// position in the input slice?
+	let input = {
+		let mut input: Vec<u8> = Vec::from(&output[..]);
+		// TODO: Why is the last byte not being copied without the +1?
+		safemem::copy_over(&mut input, offsets.copy_from_offset as usize, offsets.copy_to_offset as usize, offsets.copy_length as usize + 1);
+		input
+	};
+
+	// println!("{:x?}", &input[offsets.decompress_from_offset as usize..]);
+
+	let mut decompressor = Decompressor::new(&input[offsets.decompress_from_offset as usize..])?;
+	let mut output_index = offsets.decompress_to_offset as usize;
+
 	// offset = (offset << 8) | *(u8*)si++;
 	// ax = si;
 	// si = di-offset-1;
 	// while (count--) *(u8*)di++ = *(u8*)si++;
 	// si = ax;
+
+	loop {
+		let op = decompressor.next_op()?;
+		// println!("{:x?}", op);
+		match op {
+			Op::Noop => {
+				continue;
+			},
+			Op::Literal(value) => {
+				output[output_index] = value;
+				output_index += 1;
+			},
+			Op::Terminate => {
+				break;
+			},
+			Op::CopyBytes{ offset, count } => {
+				safemem::copy_over(output, output_index - (offset as usize) - 1, output_index, count.into());
+				output_index += count as usize;
+			}
+		}
+	}
+	Ok(output_index)
 }
 
 macro_rules! err (
@@ -479,7 +666,7 @@ macro_rules! try_parse (
 	})
 );
 
-fn fix_file(in_filename: &str, out_filename: &str) -> Result<(), Error> {
+fn fix_file(in_filename: &str, out_filename: &str) -> Result<(usize, usize), Error> {
 	let input = {
 		let mut file = File::open(&in_filename)?;
 		let mut input: Vec<u8> = Vec::with_capacity(file.metadata()?.len() as usize);
@@ -496,7 +683,7 @@ fn fix_file(in_filename: &str, out_filename: &str) -> Result<(), Error> {
 		return Err(Error::new(ErrorKind::InvalidData, "Not a self-loading executable"));
 	}
 
-	println!("{:#?}", ne_header);
+	// println!("{:#?}", ne_header);
 
 	let module_name = {
 		let ne_non_resident_table = &input[(ne_header.non_resident_table_offset as usize)..];
@@ -512,14 +699,14 @@ fn fix_file(in_filename: &str, out_filename: &str) -> Result<(), Error> {
 		), "Invalid segment table")
 	};
 
-	println!("{:#?}", &segments);
+	// println!("{:#?}", &segments);
 
 	let resource_table = {
 		let ne_resource_table = &ne_executable[ne_header.resource_table_offset as usize..];
 		try_parse!(get_resource_table(&ne_resource_table), "Invalid resource table")
 	};
 
-	println!("{:#?}", &resource_table);
+	// println!("{:#?}", &resource_table);
 
 	let cseg0_header = &segments[0];
 	let cseg0 = &input[cseg0_header.offset as usize..];
@@ -550,19 +737,21 @@ fn fix_file(in_filename: &str, out_filename: &str) -> Result<(), Error> {
 
 	println!("Unpacking {}", module_name);
 
-	let (copy_from, copy_to) = {
-		let offsets = try_parse!(detect_offsets(&offsets_bytecode), "Failed to find code offsets");
-		(offsets.0, offsets.1 - ne_selfload_header.optloader_code_length)
-	};
-
-	// copy executable headers
+	// copy executable header
 	let mut out: Vec<u8> = Vec::new();
-	out.extend(&input[0..segments[0].offset as usize]);
+	out.extend_from_slice(&input[0..segments[0].offset as usize]);
+	out.extend_from_slice(&input[segments[0].offset as usize..(segments[0].offset as usize + segments[0].length as usize)]);
+	out.resize(out.len() + ((segments[0].alloc_size - segments[0].length) as usize), 0);
 
-	// rewrite segment table
-	{
+	let offsets = try_parse!(get_offsets(&offsets_bytecode, ne_selfload_header.optloader_code_length), "Failed to find code offsets");
+	unpack_load_app_seg(&mut out[segments[0].offset as usize..], offsets)?;
 
-	}
+	// println!("Wrote {} code bytes", unpacked_size);
+
+	out.extend_from_slice(&input[segments[0].offset as usize + segments[0].length as usize..]);
+
+	LE::write_u16(&mut out[(ne_offset as usize + /* num segments */ 28)..], 1);
+	LE::write_u16(&mut out[(ne_offset as usize + ne_header.segment_table_offset as usize) + 2..], segments[0].alloc_size as u16);
 
 	// rewrite_segment_table(&mut out[(ne_offset + ne_header.segment_table_offset) as usize..]);
 	// rewrite_resource_table(&mut out[(ne_offset + ne_header.resource_table_offset) as usize..]);
@@ -576,7 +765,6 @@ fn fix_file(in_filename: &str, out_filename: &str) -> Result<(), Error> {
 	// }
 
 	// TODO:
-	// - Copy over headers
 	// - Clear selfload flag
 	// - Rewrite segment table
 	// - Rewrite resource table
@@ -587,12 +775,9 @@ fn fix_file(in_filename: &str, out_filename: &str) -> Result<(), Error> {
 	// - Copy executable trailer data
 	// - Rewrite offset to trailer data
 
-	//safemem::copy_over(cseg0, copy_from.into(), copy_to.into(), ne_selfload_header.optloader_code_length.into());
-	//unpack_load_app_seg(cseg0, (ne_selfload_header.load_app_seg_offset & 0xffff) as u16, copy_to + 1);
+	std::fs::write(out_filename, &out)?;
 
-	// std::fs::write(String::from(filename) + ".out", &executable)?;
-
-	Ok(())
+	Ok((input.len(), out.len()))
 }
 
 fn main() {
@@ -608,7 +793,9 @@ fn main() {
 	};
 
 	match fix_file(&in_filename, &out_filename) {
-		Ok(_) => { println!("Successfully unpacked {} to {}", &in_filename, &out_filename); },
+		Ok((in_size, out_size)) => {
+			println!("Successfully unpacked {} to {} ({} -> {} bytes)", &in_filename, &out_filename, in_size, out_size);
+		},
 		Err(e) => {
 			println!("Failed to unpack {}: {}", &in_filename, &e);
 			std::process::exit(1);
