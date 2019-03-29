@@ -757,20 +757,19 @@ fn fix_file(in_filename: &str, out_filename: &str) -> Result<(usize, usize), Err
 		let reloc_table = remainder;
 		let reloc_size = LE::read_u16(reloc_table) * RELOC_RECORD_SIZE + RELOC_COUNT_SIZE;
 		out.extend_from_slice(&reloc_table[0..reloc_size as usize]);
-		remainder = &reloc_table[reloc_size as usize..];
+		remainder = &input[segments[1].offset as usize..];
 	}
 
 	let alignment = 1 << ne_header.alignment_shift_count;
 
-	let alignment_bytes = out.len() % alignment;
+	let mut alignment_bytes = out.len() % alignment;
 	if alignment_bytes != 0 {
+		alignment_bytes = alignment - alignment_bytes;
 		out.resize(out.len() + (alignment_bytes as usize), 0);
 		size_delta += alignment_bytes;
 	}
 
-	size_delta >>= ne_header.alignment_shift_count;
-
-	println!("Extending by {} sectors", size_delta);
+	size_delta = (size_delta + alignment) >> ne_header.alignment_shift_count;
 
 	out.extend_from_slice(remainder);
 
