@@ -740,18 +740,52 @@ fn fix_file(in_filename: &str, out_filename: &str) -> Result<(usize, usize), Err
 	// copy executable header
 	let mut out: Vec<u8> = Vec::new();
 	out.extend_from_slice(&input[0..segments[0].offset as usize]);
+
+	// eventually this will be in a loop
+	let mut size_delta = (segments[0].alloc_size - segments[0].length) as usize;
 	out.extend_from_slice(&input[segments[0].offset as usize..(segments[0].offset as usize + segments[0].length as usize)]);
-	out.resize(out.len() + ((segments[0].alloc_size - segments[0].length) as usize), 0);
+	out.resize(out.len() + size_delta, 0);
 
 	let offsets = try_parse!(get_offsets(&offsets_bytecode, ne_selfload_header.optloader_code_length), "Failed to find code offsets");
 	unpack_load_app_seg(&mut out[segments[0].offset as usize..], offsets)?;
 
-	// println!("Wrote {} code bytes", unpacked_size);
+	let mut remainder = &input[segments[0].offset as usize + segments[0].length as usize..];
 
-	out.extend_from_slice(&input[segments[0].offset as usize + segments[0].length as usize..]);
+	if segments[0].flags.contains(NESegmentFlags::HAS_RELOC) {
+		const RELOC_COUNT_SIZE: u16 = 2;
+		const RELOC_RECORD_SIZE: u16 = 8;
+		let reloc_table = remainder;
+		let reloc_size = LE::read_u16(reloc_table) * RELOC_RECORD_SIZE + RELOC_COUNT_SIZE;
+		out.extend_from_slice(&reloc_table[0..reloc_size as usize]);
+		remainder = &reloc_table[reloc_size as usize..];
+	}
 
-	LE::write_u16(&mut out[(ne_offset as usize + /* num segments */ 28)..], 1);
+	let alignment = 1 << ne_header.alignment_shift_count;
+
+	let alignment_bytes = out.len() % alignment;
+	if alignment_bytes != 0 {
+		out.resize(out.len() + (alignment_bytes as usize), 0);
+		size_delta += alignment_bytes;
+	}
+
+	size_delta >>= ne_header.alignment_shift_count;
+
+	println!("Extending by {} sectors", size_delta);
+
+	out.extend_from_slice(remainder);
+
+	// LE::write_u16(&mut out[(ne_offset as usize + /* num segments */ 28)..], 1);
 	LE::write_u16(&mut out[(ne_offset as usize + ne_header.segment_table_offset as usize) + 2..], segments[0].alloc_size as u16);
+
+	{
+		const ENTRY_SIZE: usize = 8;
+		let mut segment_table = &mut out[ne_offset as usize + ne_header.segment_table_offset as usize + /* skip to first entry */ ENTRY_SIZE..];
+		for _ in 1..ne_header.num_segments {
+			let new_offset = LE::read_u16(&segment_table) + size_delta as u16;
+			LE::write_u16(&mut segment_table, new_offset);
+			segment_table = &mut segment_table[ENTRY_SIZE..];
+		}
+	}
 
 	// rewrite_segment_table(&mut out[(ne_offset + ne_header.segment_table_offset) as usize..]);
 	// rewrite_resource_table(&mut out[(ne_offset + ne_header.resource_table_offset) as usize..]);
