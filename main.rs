@@ -52,7 +52,7 @@ struct NEHeader {
 	entry_point:               u32,
 	init_stack_pointer:        u32,
 	num_segments:              u16,
-	num_modules:               u16,
+	num_imports:               u16,
 	names_size:                u16,
 	segment_table_offset:      u16, // bytes, from start of NEHeader
 	resource_table_offset:     u16,
@@ -96,7 +96,7 @@ named!(read_ne_header<NEHeader>,
 /*20*/	entry_point:               le_u32 >> // cs:ip
 /*24*/	init_stack_pointer:        le_u32 >> // ss:sp
 /*28*/	num_segments:              le_u16 >>
-		num_modules:               le_u16 >>
+		num_imports:               le_u16 >>
 		names_size:                le_u16 >>
 		segment_table_offset:      le_u16 >>
 		resource_table_offset:     le_u16 >>
@@ -127,7 +127,7 @@ named!(read_ne_header<NEHeader>,
 			entry_point,
 			init_stack_pointer,
 			num_segments,
-			num_modules,
+			num_imports,
 			names_size,
 			segment_table_offset,
 			resource_table_offset,
@@ -401,6 +401,54 @@ named!(read_relocation<NESegmentRelocation>,
 				_ => { panic!("Unknown relocation target {}", flags & 3); }
 			}
 		})
+	)
+);
+
+bitflags!(struct NEEntryPointFlags: u8 {
+	const EXPORTED      = 1;
+	const MULTIPLE_DATA = 2;
+});
+
+#[derive(Debug, Clone)]
+enum NEEntryPoint {
+	None,
+	Moveable{ flags: NEEntryPointFlags, segment: u8, offset: u16 },
+	Constant{ flags: NEEntryPointFlags, segment: u8, offset: u16 },
+}
+
+named!(read_entry_point_bundle<Vec<NEEntryPoint> >,
+	do_parse!(
+		count: le_u8 >>
+		entry_points: switch!(le_u8,
+			0    => count!(value!(NEEntryPoint::None), count as usize) |
+			0xff => count!(do_parse!(
+				flags:   le_u8 >>
+				         tag!("\x3f") >>
+				segment: le_u8 >>
+				offset:  le_u16 >>
+				(NEEntryPoint::Moveable {
+					flags: NEEntryPointFlags::from_bits_truncate(flags),
+					segment,
+					offset
+				})
+			), count as usize) |
+			segment => count!(do_parse!(
+				flags:  le_u8 >>
+				offset: le_u16 >>
+				(NEEntryPoint::Constant {
+					flags: NEEntryPointFlags::from_bits_truncate(flags),
+					segment,
+					offset
+				})
+			), count as usize)
+		) >> (entry_points)
+	)
+);
+
+named!(get_entry_points<Vec<NEEntryPoint> >,
+	do_parse!(
+		results: many_till!(read_entry_point_bundle, tag!("\0")) >>
+		(results.0.into_iter().flatten().collect())
 	)
 );
 
@@ -683,10 +731,10 @@ fn fix_file(in_filename: &str, out_filename: &str) -> Result<(usize, usize), Err
 		return Err(Error::new(ErrorKind::InvalidData, "Not a self-loading executable"));
 	}
 
-	// println!("{:#?}", ne_header);
+	println!("{:#?}", ne_header);
 
 	let module_name = {
-		let ne_non_resident_table = &input[(ne_header.non_resident_table_offset as usize)..];
+		let ne_non_resident_table = &input[ne_header.non_resident_table_offset as usize..];
 		try_parse!(read_pascal_string(&ne_non_resident_table), "Invalid executable name")
 	};
 
@@ -707,6 +755,13 @@ fn fix_file(in_filename: &str, out_filename: &str) -> Result<(usize, usize), Err
 	};
 
 	// println!("{:#?}", &resource_table);
+
+	let entry_table = {
+		let ne_entry_table = &ne_executable[ne_header.entry_table_offset as usize..ne_header.entry_table_offset as usize + ne_header.entry_table_length as usize];
+		try_parse!(get_entry_points(&ne_entry_table), "Invalid entry table")
+	};
+
+	println!("{:#?}", &entry_table);
 
 	let cseg0_header = &segments[0];
 	let cseg0 = &input[cseg0_header.offset as usize..];
