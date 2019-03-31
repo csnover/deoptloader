@@ -825,7 +825,7 @@ fn fix_file(in_filename: &str, out_filename: &str) -> Result<(usize, usize), Err
 		size_delta += alignment_bytes;
 	}
 
-	size_delta = (size_delta + alignment) >> ne_header.alignment_shift_count;
+	size_delta >>= ne_header.alignment_shift_count;
 
 	out.extend_from_slice(remainder);
 
