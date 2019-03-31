@@ -75,7 +75,7 @@ struct NEHeader {
 bitflags!(struct NESegmentFlags: u16 {
 	const CODE      = 0x0000;
 	const DATA      = 0x0001;
-	const MOVEABLE  = 0x0010;
+	const MOVABLE   = 0x0010;
 	const PRELOAD   = 0x0040;
 	const HAS_RELOC = 0x0100;
 	const PRIORITY  = 0xF000;
@@ -175,9 +175,9 @@ named_args!(get_segments(offset_shift: u16, num_segments: u16)<Vec<NESegmentEntr
 );
 
 bitflags!(struct NEResourceFlags: u16 {
-	const MOVEABLE = 0x10;
-	const PURE     = 0x20;
-	const PRELOAD  = 0x40;
+	const MOVABLE = 0x10;
+	const PURE    = 0x20;
+	const PRELOAD = 0x40;
 });
 
 enum_from_primitive! {
@@ -412,7 +412,7 @@ bitflags!(struct NEEntryPointFlags: u8 {
 #[derive(Debug, Clone)]
 enum NEEntryPoint {
 	None,
-	Moveable{ flags: NEEntryPointFlags, dpmi_instruction: u16, segment: u8, offset: u16 },
+	Movable{ flags: NEEntryPointFlags, dpmi_instruction: u16, segment: u8, offset: u16 },
 	Constant{ flags: NEEntryPointFlags, segment: u8, offset: u16 },
 }
 
@@ -426,7 +426,7 @@ named!(read_entry_point_bundle<Vec<NEEntryPoint> >,
 				dpmi_instruction:  le_u16 >>
 				segment:           le_u8 >>
 				offset:            le_u16 >>
-				(NEEntryPoint::Moveable {
+				(NEEntryPoint::Movable {
 					flags: NEEntryPointFlags::from_bits_truncate(flags),
 					dpmi_instruction,
 					segment,
@@ -748,7 +748,7 @@ fn fix_file(in_filename: &str, out_filename: &str) -> Result<(usize, usize), Err
 		), "Invalid segment table")
 	};
 
-	// println!("{:#?}", &segments);
+	println!("{:#?}", &segments);
 
 	let resource_table = {
 		let ne_resource_table = &ne_executable[ne_header.resource_table_offset as usize..];
