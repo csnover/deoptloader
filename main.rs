@@ -412,7 +412,7 @@ bitflags!(struct NEEntryPointFlags: u8 {
 #[derive(Debug, Clone)]
 enum NEEntryPoint {
 	None,
-	Moveable{ flags: NEEntryPointFlags, segment: u8, offset: u16 },
+	Moveable{ flags: NEEntryPointFlags, dpmi_instruction: u16, segment: u8, offset: u16 },
 	Constant{ flags: NEEntryPointFlags, segment: u8, offset: u16 },
 }
 
@@ -422,12 +422,13 @@ named!(read_entry_point_bundle<Vec<NEEntryPoint> >,
 		entry_points: switch!(le_u8,
 			0    => count!(value!(NEEntryPoint::None), count as usize) |
 			0xff => count!(do_parse!(
-				flags:   le_u8 >>
-				         tag!("\x3f") >>
-				segment: le_u8 >>
-				offset:  le_u16 >>
+				flags:             le_u8 >>
+				dpmi_instruction:  le_u16 >>
+				segment:           le_u8 >>
+				offset:            le_u16 >>
 				(NEEntryPoint::Moveable {
 					flags: NEEntryPointFlags::from_bits_truncate(flags),
+					dpmi_instruction,
 					segment,
 					offset
 				})
