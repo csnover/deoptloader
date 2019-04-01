@@ -1,9 +1,12 @@
 use bitflags::bitflags;
+use byteorder::{ByteOrder, LE};
+use crate::util::read_pascal_string;
+use crate::{err, try_parse};
 use enum_primitive::*;
 use nom::{apply, count, do_parse, le_u8, le_u16, le_u32, many_till, named, named_args, switch, tag, take, value};
-use crate::util::read_pascal_string;
+use std::io::Error;
 
-named!(pub get_ne_offset<u16>,
+named!(get_ne_offset<u16>,
 	do_parse!(
 		           tag!("MZ") >>
 		           take!(58) >>
@@ -30,7 +33,7 @@ pub struct NEHeader {
 	pub linker_major_version:      u8,
 	pub linker_minor_version:      u8,
 	pub entry_table_offset:        u16,
-	pub entry_table_length:        u16,
+	pub entry_table_size:          u16,
 	pub crc:                       u32,
 	pub flags:                     NEFlags,
 	pub auto_data_segment_index:   u16,
@@ -40,7 +43,7 @@ pub struct NEHeader {
 	pub init_stack_pointer:        u32,
 	pub num_segments:              u16,
 	pub num_imports:               u16,
-	pub names_size:                u16,
+	pub non_resident_table_size:   u16,
 	pub segment_table_offset:      u16, // bytes, from start of NEHeader
 	pub resource_table_offset:     u16,
 	pub names_table_offset:        u16,
@@ -68,23 +71,23 @@ bitflags!(pub struct NESegmentFlags: u16 {
 	const PRIORITY  = 0xF000;
 });
 
-named!(pub read_ne_header<NEHeader>,
+named!(read_ne_header<NEHeader>,
 	do_parse!(
-/*0*/	                           tag!("NE") >>
-/*2*/	linker_major_version:      le_u8 >>
-/*3*/	linker_minor_version:      le_u8 >>
-/*4*/	entry_table_offset:        le_u16 >> // relative to beginning of header
-/*6*/	entry_table_length:        le_u16 >> // bytes
-/*8*/	crc:                       le_u32 >>
-/*12*/	flags:                     le_u16 >>
-/*14*/	auto_data_segment_index:   le_u16 >>
-/*16*/	heap_size:                 le_u16 >>
-/*18*/	stack_size:                le_u16 >>
-/*20*/	entry_point:               le_u32 >> // cs:ip
-/*24*/	init_stack_pointer:        le_u32 >> // ss:sp
-/*28*/	num_segments:              le_u16 >>
+		                           tag!("NE") >>
+		linker_major_version:      le_u8 >>
+		linker_minor_version:      le_u8 >>
+		entry_table_offset:        le_u16 >> // relative to beginning of header
+		entry_table_size:          le_u16 >> // bytes
+		crc:                       le_u32 >>
+		flags:                     le_u16 >>
+		auto_data_segment_index:   le_u16 >>
+		heap_size:                 le_u16 >>
+		stack_size:                le_u16 >>
+		entry_point:               le_u32 >> // cs:ip
+		init_stack_pointer:        le_u32 >> // ss:sp
+		num_segments:              le_u16 >>
 		num_imports:               le_u16 >>
-		names_size:                le_u16 >>
+		non_resident_table_size:   le_u16 >>
 		segment_table_offset:      le_u16 >>
 		resource_table_offset:     le_u16 >>
 		names_table_offset:        le_u16 >>
@@ -105,7 +108,7 @@ named!(pub read_ne_header<NEHeader>,
 			linker_major_version,
 			linker_minor_version,
 			entry_table_offset,
-			entry_table_length,
+			entry_table_size,
 			crc,
 			flags: NEFlags::from_bits_truncate(flags),
 			auto_data_segment_index,
@@ -115,7 +118,7 @@ named!(pub read_ne_header<NEHeader>,
 			init_stack_pointer,
 			num_segments,
 			num_imports,
-			names_size,
+			non_resident_table_size,
 			segment_table_offset,
 			resource_table_offset,
 			names_table_offset,
@@ -138,27 +141,29 @@ named!(pub read_ne_header<NEHeader>,
 
 #[derive(Clone, Debug)]
 pub struct NESegmentEntry {
-	pub offset:        u32, // bytes
-	pub length:        u32, // bytes
-	pub flags:         NESegmentFlags,
-	pub alloc_size:    u32, // bytes
+	pub offset:     u32, // bytes
+	pub data_size:  u32, // bytes
+	pub flags:      NESegmentFlags,
+	pub alloc_size: u32, // bytes
 }
 
-named_args!(pub get_segments(offset_shift: u16, num_segments: u16)<Vec<NESegmentEntry> >,
-	count!(
-		do_parse!(
-			offset:     le_u16 >>
-			length:     le_u16 >>
-			flags:      le_u16 >>
-			alloc_size: le_u16 >>
-			(NESegmentEntry {
-				offset:        (offset as u32) << offset_shift,
-				length:        if length == 0 { 0x10000 } else { length.into() },
-				flags:         NESegmentFlags::from_bits_truncate(flags),
-				alloc_size:    if alloc_size == 0 { 0x10000 } else { alloc_size.into() }
-			})
-		), num_segments as usize
+named_args!(read_segment_header(offset_shift: u16)<NESegmentEntry>,
+	do_parse!(
+		offset:     le_u16 >>
+		data_size:  le_u16 >>
+		flags:      le_u16 >>
+		alloc_size: le_u16 >>
+		(NESegmentEntry {
+			offset:     (offset as u32) << offset_shift,
+			data_size:  if data_size == 0 { 0x10000 } else { data_size.into() },
+			flags:      NESegmentFlags::from_bits_truncate(flags),
+			alloc_size: if alloc_size == 0 { 0x10000 } else { alloc_size.into() }
+		})
 	)
+);
+
+named_args!(get_segments(offset_shift: u16, num_segments: u16)<Vec<NESegmentEntry> >,
+	count!(apply!(read_segment_header, offset_shift), num_segments as usize)
 );
 
 bitflags!(pub struct NEResourceFlags: u16 {
@@ -363,7 +368,7 @@ pub enum NESegmentRelocationTarget {
 #[derive(Clone, Debug)]
 pub struct NESegmentRelocation {
 	pub kind:     NESegmentRelocationSourceKind,
-	pub offset:   u16,
+	pub offset:   u16, // offset to source chain, bytes from start of segment
 	pub additive: bool,
 	pub target:   NESegmentRelocationTarget,
 }
@@ -373,15 +378,16 @@ named!(read_relocation<NESegmentRelocation>,
 		kind:   le_u8 >>
 		flags:  le_u8 >>
 		offset: le_u16 >>
-		data1:  le_u16 >> // TODO: wrong for ADDITIVE flag
+		data1:  le_u16 >>
 		data2:  le_u16 >>
 		(NESegmentRelocation {
-			kind: NESegmentRelocationSourceKind::from_u8(kind).expect(&format!("Unknown relocation type {}", kind)),
+			kind: NESegmentRelocationSourceKind::from_u8(kind)
+					.expect(&format!("Unknown relocation type {}", kind)),
 			offset,
 			additive: (flags & 4) == 4,
 			target: match flags & 3 {
 				0 => NESegmentRelocationTarget::InternalRef {
-					segment: (data1 & 0xff) as u8,
+					segment: data1 as u8,
 					offset: data2
 				},
 				1 => NESegmentRelocationTarget::ImportOrdinal {
@@ -418,19 +424,205 @@ pub struct NESelfLoadHeader {
 named!(pub read_selfload_header<NESelfLoadHeader>,
 	do_parse!(
 		                       tag!("A0") >>
-		                       le_u16 >> // reserved
-		boot_app_offset:       le_u32 >>
-		load_app_seg_offset:   le_u32 >>
-		                       le_u32 >> // reserved
-		                       le_u32 >> // mem alloc
-		                       le_u32 >> // ordinal resolve
-		                       le_u32 >> // exit
-		                       count!(le_u16, 4) >> // reserved
-		                       le_u32 >> // set owner
-		// these next fields are optloader-specific
+		                       take!(2) >>     // reserved
+		boot_app_offset:       le_u32 >>       // segment:offset
+		load_app_seg_offset:   le_u32 >>       // segment:offset
+		                       take!(4) >>     // reserved
+		                       take!(4) >>     // mem alloc
+		                       take!(4) >>     // ordinal resolve
+		                       take!(4) >>     // exit
+		                       take!(2 * 4) >> // reserved
+		                       take!(4) >>     // set owner
 		(NESelfLoadHeader {
 			boot_app_offset,
 			load_app_seg_offset
 		})
 	)
 );
+
+const SEGMENT_HEADER_SIZE: u16 = 8;
+const FIXUP_SIZE: u16 = 8;
+
+pub struct NEExecutable<'a> {
+	input:         &'a [u8],
+	header:        NEHeader,
+	header_offset: u16,
+	/// A raw header slice is stored to make it easier to resolve offsets which
+	/// are relative to the start of the NE header
+	raw_header:    &'a [u8],
+}
+
+pub struct NESegmentsIterator<'a> {
+	ne:    &'a NEExecutable<'a>,
+	index: u16,
+	len:   u16,
+}
+
+impl<'a> NESegmentsIterator<'a> {
+	pub fn new(ne: &'a NEExecutable) -> NESegmentsIterator<'a> {
+		NESegmentsIterator {
+			ne,
+			index: 0,
+			len: ne.get_header().num_segments
+		}
+	}
+}
+
+impl<'a> Iterator for NESegmentsIterator<'a> {
+	type Item = (NESegmentEntry, &'a [u8]);
+
+	fn next(&mut self) -> Option<Self::Item> {
+		if self.index < self.len {
+			self.index += 1;
+			Some((
+				self.ne.get_segment_header(self.index).unwrap(),
+				self.ne.get_segment_data(self.index).unwrap()
+			))
+		} else {
+			None
+		}
+	}
+}
+
+pub struct NEResourcesIterator<'a> {
+	table:        &'a [u8],
+	index:        usize,
+	offset_shift: u16,
+	block_index:  u16,
+	block_len:    u16,
+	finished:     bool,
+}
+
+impl<'a> NEResourcesIterator<'a> {
+	pub fn new(table: &'a [u8]) -> NEResourcesIterator<'a> {
+		let offset_shift = LE::read_u16(table);
+		let mut iterator = NEResourcesIterator {
+			table,
+			index: 0,
+			offset_shift,
+			block_index: 0,
+			block_len: 0,
+			finished: false,
+		};
+		iterator.load_next_block();
+		iterator
+	}
+
+	fn load_next_block(&mut self) {
+		self.finished = LE::read_u16(&self.table[self.index..]) == 0;
+		if !self.finished {
+			self.block_index = 0;
+			self.block_len = LE::read_u16(&self.table[self.index + 2..]);
+			self.index += 8;
+		}
+	}
+}
+
+impl<'a> Iterator for NEResourcesIterator<'a> {
+	type Item = NEResourceEntry;
+
+	fn next(&mut self) -> Option<Self::Item> {
+		if self.block_index == self.block_len {
+			self.load_next_block();
+		}
+
+		if self.finished {
+			None
+		} else {
+			let (_, header) = read_resource(&self.table[self.index..], self.table, self.offset_shift).unwrap();
+			self.index += 8;
+			self.block_index += 1;
+			Some(header)
+		}
+	}
+}
+
+impl<'a> NEExecutable<'a> {
+	pub fn new(input: &'a [u8]) -> Result<Self, Error> {
+		let header_offset = try_parse!(get_ne_offset(input), "Not a valid MZ executable");
+		let raw_header = &input[header_offset as usize..];
+		let header = try_parse!(read_ne_header(raw_header), "Not a valid NE executable");
+
+		Ok(NEExecutable {
+			input,
+			header,
+			header_offset, // TODO: Get rid of this
+			raw_header
+		})
+	}
+
+	pub fn get_raw_data(&self) -> &'a [u8] {
+		self.input
+	}
+
+	pub fn get_header_offset(&self) -> usize {
+		self.header_offset as usize
+	}
+
+	pub fn get_name(&self) -> Result<Option<String>, String> {
+		if self.header.non_resident_table_size == 0 {
+			Ok(None)
+		} else {
+			let ne_non_resident_table = &self.input[self.header.non_resident_table_offset as usize..];
+			match read_pascal_string(&ne_non_resident_table) {
+				Ok((_, name)) => Ok(Some(name)),
+				Err(error) => Err(format!("Error reading executable name: {}", error))
+			}
+		}
+	}
+
+	pub fn get_header(&self) -> &NEHeader {
+		&self.header
+	}
+
+	pub fn get_selfload_header(&self) -> Result<Option<(NESelfLoadHeader, &[u8])>, String> {
+		if self.header.flags.contains(NEFlags::SELF_LOAD) {
+			Ok(Some(self.get_selfload_header_impl()?))
+		} else {
+			Ok(None)
+		}
+	}
+
+	/// # Arguments
+	/// * segment_number - 1-indexed segment number
+	pub fn get_segment_header(&self, segment_number: u16) -> Result<NESegmentEntry, String> {
+		if segment_number == 0 || segment_number > self.header.num_segments {
+			Err(format!("Bad segment number: {}", segment_number))
+		} else {
+			let offset = self.header.segment_table_offset + ((segment_number - 1) * SEGMENT_HEADER_SIZE);
+			match read_segment_header(&self.raw_header[offset as usize..], self.header.alignment_shift_count) {
+				Ok(result) => Ok(result.1),
+				Err(error) => Err(format!("Error reading segment {} header: {}", segment_number, error))
+			}
+		}
+	}
+
+	/// # Arguments
+	/// * segment_number - 1-indexed segment number
+	pub fn get_segment_data(&self, segment_number: u16) -> Result<&[u8], String> {
+		let header = self.get_segment_header(segment_number)?;
+		let data = &self.input[header.offset as usize..];
+		let mut size = header.data_size as usize;
+		if header.flags.contains(NESegmentFlags::HAS_RELOC) {
+			let fixup_table_size = LE::read_u16(&data[size..]) as usize * FIXUP_SIZE as usize;
+			size += fixup_table_size;
+		}
+		Ok(&data[..size])
+	}
+
+	pub fn iter_segments(&self) -> NESegmentsIterator {
+		NESegmentsIterator::new(&self)
+	}
+
+	pub fn iter_resources(&self) -> NEResourcesIterator {
+		NEResourcesIterator::new(&self.raw_header[self.header.resource_table_offset as usize..])
+	}
+
+	fn get_selfload_header_impl(&self) -> Result<(NESelfLoadHeader, &[u8]), String> {
+		let segment_data = self.get_segment_data(1)?;
+		match read_selfload_header(segment_data) {
+			Ok(header) => Ok((header.1, header.0)),
+			Err(error) => Err(format!("Error reading self-load header: {}", error))
+		}
+	}
+}

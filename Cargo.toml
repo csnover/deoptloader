@@ -6,12 +6,13 @@ edition = "2018"
 license = "Apache-2.0"
 
 [dependencies]
-bitflags = "*"
-byteorder = "*"
-enum_primitive = "*"
-nom = "*"
-num = "*"
-safemem = "*"
+bitflags = "1"
+byteorder = "1"
+encoding = "0.2"
+enum_primitive = "0.1"
+nom = "4"
+num = "0.2"
+safemem = "0.3"
 
 [[bin]]
 name = "deoptloader"
