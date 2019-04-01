@@ -1,7 +1,10 @@
 use byteorder::{ByteOrder, LE};
 use crate::err;
-use std::io::{Error, ErrorKind};
+use crate::neexe::NESegmentRelocationSourceKind as SourceKind;
+use enum_primitive::FromPrimitive;
+use std::io::Error;
 
+#[derive(Debug)]
 enum GroupKind {
 	ZeroOffsetInternalRef,
 	InternalRef { flags: u8, segment: u8, },
@@ -9,11 +12,11 @@ enum GroupKind {
 	OsFixup     { flags: u8, kind:    u16, },
 }
 
-struct FixupConverter<'a> {
+pub struct FixupConverter<'a> {
 	input:             &'a [u8],
 	total_count:       u16,
 	group_count:       u8,
-	group_source_kind: u8,
+	group_source_kind: SourceKind,
 	group_kind:        GroupKind,
 }
 
@@ -23,7 +26,7 @@ impl<'a> FixupConverter<'a> {
 			input,
 			total_count,
 			group_count:       0,
-			group_source_kind: 0,
+			group_source_kind: SourceKind::LoByte,
 			group_kind:        GroupKind::ZeroOffsetInternalRef
 		}
 	}
@@ -40,14 +43,18 @@ impl<'a> FixupConverter<'a> {
 
 		if operation == 0xf0 {
 			self.group_kind = GroupKind::ZeroOffsetInternalRef;
-			self.group_source_kind = 2;
+			self.group_source_kind = SourceKind::Segment;
+			self.input = &self.input[2..];
 		} else {
 			self.group_source_kind = match operation & 3 {
-				4    => 5,
-				kind => kind
+				0 => SourceKind::LoByte,
+				1 => SourceKind::Segment,
+				2 => SourceKind::FarAddr,
+				3 => SourceKind::Offset,
+				_ => unreachable!()
 			};
 			let additive = operation & 4;
-			match (operation >> 2) & 3 {
+			match (operation >> 3) & 3 {
 				0 => {
 					self.group_kind = GroupKind::InternalRef {
 						flags:   additive,
@@ -65,7 +72,10 @@ impl<'a> FixupConverter<'a> {
 				3 => {
 					self.group_kind = GroupKind::OsFixup {
 						flags: 3 + additive,
-						kind:  LE::read_u16(&self.input[2..])
+						kind:  match LE::read_u16(&self.input[2..]) {
+							kind @ 1...6 => kind,
+							kind => panic!("Invalid OsFixup type {}", kind)
+						}
 					};
 					self.input = &self.input[4..];
 				},
@@ -82,18 +92,14 @@ impl<'a> Iterator for FixupConverter<'a> {
 	type Item = [u8; FIXUP_RECORD_SIZE];
 
 	fn next(&mut self) -> Option<Self::Item> {
-		if self.total_count == 0 {
-			return None;
-		}
-
-		if self.group_count == 0 && !self.next_group().is_ok() {
+		if self.group_count == 0 && (self.total_count == 0 || !self.next_group().is_ok()) {
 			return None;
 		}
 
 		self.group_count -= 1;
 
 		let mut record: [u8; FIXUP_RECORD_SIZE] = [0; FIXUP_RECORD_SIZE];
-		record[0] = self.group_source_kind;
+		record[0] = self.group_source_kind.clone() as u8;
 
 		match self.group_kind {
 			GroupKind::ZeroOffsetInternalRef => {

@@ -5,19 +5,20 @@ use std::io::{Error, ErrorKind};
 pub enum Op {
 	Literal(u8),
 	CopyBytes { count: u8, offset: u16 },
-	Terminate,
+	Terminate(usize),
 	Noop
 }
 
 pub struct Decompressor<'a> {
-	data: &'a[u8],
+	data:         &'a[u8],
 	instructions: u16,
-	count: u8,
+	count:        u8,
+	index:        usize,
 }
 
 impl<'a> Decompressor<'a> {
 	pub fn new(data: &'a [u8]) -> Result<Decompressor, Error> {
-		let mut decompressor = Decompressor { data, instructions: 0, count: 0 };
+		let mut decompressor = Decompressor { data, instructions: 0, count: 0, index: 0 };
 		decompressor.fetch_instructions()?;
 		Ok(decompressor)
 	}
@@ -30,6 +31,7 @@ impl<'a> Decompressor<'a> {
 
 		self.instructions = LE::read_u16(&self.data);
 		self.data = &self.data[2..];
+		self.index += 2;
 		self.count = 16;
 		Ok(())
 	}
@@ -63,6 +65,7 @@ impl<'a> Decompressor<'a> {
 		}
 		let byte = self.data[0];
 		self.data = &self.data[1..];
+		self.index += 1;
 		Ok(byte)
 	}
 
@@ -141,7 +144,7 @@ impl<'a> Decompressor<'a> {
 								if count < 0x81 {
 									return Ok(Op::CopyBytes{ count: count, offset: self.get_offset()? });
 								} else if count != 0x81 {
-									return Ok(Op::Terminate);
+									return Ok(Op::Terminate(self.index));
 								} else {
 									return Ok(Op::Noop);
 								}

@@ -1,12 +1,13 @@
 #![recursion_limit = "1024"]
 
 mod decompressor;
-mod fixup_parser;
+mod fixup_converter;
 mod neexe;
 #[macro_use] mod util;
 
 use byteorder::{ByteOrder, LittleEndian as LE};
 use decompressor::{Decompressor, Op};
+use fixup_converter::FixupConverter;
 use neexe::*;
 use nom::{do_parse, le_u16, named, named_args, tag, take_until, take_until_and_consume};
 use std::io::prelude::*;
@@ -58,6 +59,7 @@ struct OptUnpacker<'a> {
 	copyright:         String,
 	boot_code_offsets: OptOffsets,
 	sector_alignment:  usize,
+	debug: bool,
 }
 
 impl<'a> OptUnpacker<'a> {
@@ -93,7 +95,8 @@ impl<'a> OptUnpacker<'a> {
 			// segment_table,
 			// resource_table,
 			boot_code_offsets,
-			sector_alignment: 1 << ne.get_header().alignment_shift_count
+			sector_alignment: 1 << ne.get_header().alignment_shift_count,
+			debug: false
 		})
 	}
 
@@ -101,13 +104,20 @@ impl<'a> OptUnpacker<'a> {
 		&self.copyright
 	}
 
-	fn run_decompressor(&mut self, input: &[u8], start_index: usize, offsets: OptOffsets) -> Result<usize, Error> {
+	fn run_decompressor(&mut self, input: &[u8], start_index: usize, offsets: OptOffsets) -> Result<(usize, usize), Error> {
 		let mut decompressor = Decompressor::new(&input[offsets.decompress_from_offset as usize..])?;
 		let output = &mut self.output[start_index..];
 		let mut output_index = offsets.decompress_to_offset as usize;
 
+		if self.debug {
+			println!("start@{}", start_index);
+		}
+
 		loop {
 			let op = decompressor.next_op()?;
+			if self.debug {
+				println!("{:x?}", op);
+			}
 			match op {
 				Op::Noop => {
 					continue;
@@ -116,8 +126,8 @@ impl<'a> OptUnpacker<'a> {
 					output[output_index] = value;
 					output_index += 1;
 				},
-				Op::Terminate => {
-					break;
+				Op::Terminate(input_index) => {
+					return Ok((offsets.decompress_from_offset as usize + input_index, output_index));
 				},
 				Op::CopyBytes{ offset, count } => {
 					safemem::copy_over(output, output_index - (offset as usize) - 1, output_index, count.into());
@@ -125,13 +135,18 @@ impl<'a> OptUnpacker<'a> {
 				}
 			}
 		}
-
-		Ok(output_index)
 	}
 
-	fn unpack_load_app_segment(&mut self) -> Result<usize, Box<std::error::Error>> {
+	fn unpack_boot_segment(&mut self) -> Result<usize, Box<std::error::Error>> {
 		let segment_header = self.ne.get_segment_header(1)?;
 		let segment_data = self.ne.get_segment_data(1)?;
+
+		let new_segment_header = {
+			let mut header = segment_header.clone();
+			header.data_size = header.alloc_size;
+			header
+		};
+		self.set_segment_table_entry(1, new_segment_header);
 
 		let offsets = &self.boot_code_offsets;
 		// TODO: Instead of creating a duplicate copy of the input data, look
@@ -156,7 +171,7 @@ impl<'a> OptUnpacker<'a> {
 		let expected_size = self.output.len() + segment_header.alloc_size as usize;
 		self.output.extend_from_slice(&input[..offsets.decompress_to_offset as usize]);
 		self.output.resize(expected_size, 0);
-		let mut decompressed_size = self.run_decompressor(&input, segment_header.offset as usize, (*offsets).clone())?;
+		let (_, mut decompressed_size) = self.run_decompressor(&input, segment_header.offset as usize, (*offsets).clone())?;
 		if segment_header.flags.contains(NESegmentFlags::HAS_RELOC) {
 			let fixup_table = &segment_data[segment_header.data_size as usize..];
 			self.output.extend_from_slice(fixup_table);
@@ -171,18 +186,20 @@ impl<'a> OptUnpacker<'a> {
 		Ok((self.ne.get_raw_data().len(), self.output.len()))
 	}
 
-	fn set_segment_table_entry(&mut self, index: u16, data: NESegmentEntry) {
+	fn set_segment_table_entry(&mut self, segment_number: u16, data: NESegmentEntry) {
 		let ne_header = self.ne.get_header();
 		let offset = self.ne.get_header_offset() + ne_header.segment_table_offset as usize;
 
-		let segment_table = &mut self.output[(offset + ((index - 1) * 8) as usize) as usize..];
+		let segment_table = &mut self.output[(offset + ((segment_number - 1) * 8) as usize) as usize..];
 		LE::write_u16(segment_table, (data.offset / self.sector_alignment as u32) as u16);
 		LE::write_u16(&mut segment_table[2..], data.data_size as u16);
 		LE::write_u16(&mut segment_table[4..], data.flags.bits());
 		LE::write_u16(&mut segment_table[6..], data.alloc_size as u16);
+
+		println!("{} {:#?}", segment_number, &data);
 	}
 
-	pub fn unpack_seg(&mut self, segment_number: u16) -> Result<usize, Box<std::error::Error>> {
+	pub fn unpack_normal_segment(&mut self, segment_number: u16) -> Result<usize, Box<std::error::Error>> {
 		let offsets = OptOffsets {
 			copy_from_offset: 0,
 			copy_to_offset: 0,
@@ -202,23 +219,42 @@ impl<'a> OptUnpacker<'a> {
 			header.offset = output_segment_offset as u32;
 			header.data_size = header.alloc_size;
 
-			// TODO
-			// if num_relocations > 0 {
-			// 	header.flags |= NESegmentFlags::HAS_RELOC;
-			// }
+			if num_relocations > 0 {
+				header.flags |= NESegmentFlags::HAS_RELOC;
+			}
 
 			header
 		};
 
+		// if segment_number == 2 {
+		// 	self.debug = true;
+		// 	println!("{:#?}", &new_segment_header);
+		// 	println!("rel {}", num_relocations);
+		// } else {
+		// 	self.debug = false;
+		// }
+
 		self.set_segment_table_entry(segment_number, new_segment_header);
 
 		let expected_size = self.output.len() + segment_header.alloc_size as usize;
-		self.output.extend_from_slice(&segment_data[..offsets.decompress_to_offset as usize]);
 		self.output.resize(expected_size, 0);
-		let mut decompressed_size = self.run_decompressor(&segment_data, output_segment_offset, offsets)?;
+		let (relocations_offset, mut decompressed_size) = self.run_decompressor(&segment_data, output_segment_offset, offsets)?;
+
+		// TODO: Verify that this is already the case (it should be!)
+		// if decompressed_size < segment_header.alloc_size as usize {
+		// 	for i in &mut self.output[output_segment_offset + decompressed_size..output_segment_offset + segment_header.alloc_size as usize] {
+		// 		*i = 0;
+		// 	}
+		// }
 
 		if num_relocations > 0 {
-			// TODO: Run Fixup parser
+			self.output.extend_from_slice(&[ (num_relocations & 0xff) as u8, (num_relocations >> 8 & 0xff) as u8]);
+			decompressed_size += 2;
+			let converter = FixupConverter::new(&segment_data[relocations_offset..], num_relocations);
+			for fixup in converter {
+				self.output.extend_from_slice(&fixup);
+				decompressed_size += fixup.len();
+			}
 		}
 
 		decompressed_size += self.align_output();
@@ -256,73 +292,13 @@ fn fix_file(in_filename: &str, out_filename: &str) -> Result<(usize, usize), Box
 	println!("Unpacking {}", name);
 	println!("{}", unpacker.get_copyright());
 
-	let size = unpacker.unpack_load_app_segment()?;
+	let size = unpacker.unpack_boot_segment()?;
 	println!("Unpacked boot segment ({} bytes)", size);
 
 	for segment_number in 2..=executable.get_header().num_segments {
-		let size = unpacker.unpack_seg(segment_number)?;
+		let size = unpacker.unpack_normal_segment(segment_number)?;
 		println!("Unpacked segment {} ({} bytes)", segment_number, size);
 	}
-
-	// for segment_number in 2..=executable.get_header().num_segments {
-	// 	let (in_size, out_size) = unpacker.unpack_segment(segment_number)?;
-	// }
-
-	// // eventually this will be in a loop
-	// let mut size_delta = (segments[0].alloc_size - segments[0].length) as usize;
-	// out.extend_from_slice(&input[segments[0].offset as usize..(segments[0].offset as usize + segments[0].length as usize)]);
-	// out.resize(out.len() + size_delta, 0);
-
-	// let offsets = try_parse!(get_offsets(&offsets_bytecode, optloader_header.code_length), "Failed to find code offsets");
-	// unpack_load_app_seg(&mut out[segments[0].offset as usize..], offsets)?;
-
-	// let mut remainder = &input[segments[0].offset as usize + segments[0].length as usize..];
-
-	// if segments[0].flags.contains(NESegmentFlags::HAS_RELOC) {
-	// 	const RELOC_COUNT_SIZE: u16 = 2;
-	// 	const RELOC_RECORD_SIZE: u16 = 8;
-	// 	let reloc_table = remainder;
-	// 	let reloc_size = LE::read_u16(reloc_table) * RELOC_RECORD_SIZE + RELOC_COUNT_SIZE;
-	// 	out.extend_from_slice(&reloc_table[0..reloc_size as usize]);
-	// 	remainder = &input[segments[1].offset as usize..];
-	// }
-
-	// let alignment = 1 << ne_header.alignment_shift_count;
-
-	// let mut alignment_bytes = out.len() % alignment;
-	// if alignment_bytes != 0 {
-	// 	alignment_bytes = alignment - alignment_bytes;
-	// 	out.resize(out.len() + (alignment_bytes as usize), 0);
-	// 	size_delta += alignment_bytes;
-	// }
-
-	// size_delta >>= ne_header.alignment_shift_count;
-
-	// out.extend_from_slice(remainder);
-
-	// // LE::write_u16(&mut out[(ne_offset as usize + /* num segments */ 28)..], 1);
-	// LE::write_u16(&mut out[(ne_offset as usize + ne_header.segment_table_offset as usize) + 2..], segments[0].alloc_size as u16);
-
-	// {
-	// 	const ENTRY_SIZE: usize = 8;
-	// 	let mut segment_table = &mut out[ne_offset as usize + ne_header.segment_table_offset as usize + /* skip to first entry */ ENTRY_SIZE..];
-	// 	for _ in 1..ne_header.num_segments {
-	// 		let new_offset = LE::read_u16(&segment_table) + size_delta as u16;
-	// 		LE::write_u16(&mut segment_table, new_offset);
-	// 		segment_table = &mut segment_table[ENTRY_SIZE..];
-	// 	}
-	// }
-
-	// rewrite_segment_table(&mut out[(ne_offset + ne_header.segment_table_offset) as usize..]);
-	// rewrite_resource_table(&mut out[(ne_offset + ne_header.resource_table_offset) as usize..]);
-
-	// {
-	// 	const LENGTH_FIELD: usize = 2;
-	// 	const ENTRY_SIZE: usize = 8;
-	// 	let mut out_segment_table = ;
-	// 	LE::write_u16(&mut out_segment_table[LENGTH_FIELD..], segments[0].alloc_size as u16);
-	// 	out_segment_table = &mut out_segment_table[ENTRY_SIZE..];
-	// }
 
 	// TODO:
 	// - Clear selfload flag
