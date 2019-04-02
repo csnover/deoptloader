@@ -407,7 +407,7 @@ named!(read_relocation<NESegmentRelocation>,
 	)
 );
 
-named!(pub read_relocations<Vec<NESegmentRelocation> >,
+named!(read_relocations<Vec<NESegmentRelocation> >,
 	do_parse!(
 		length:      le_u16 >>
 		relocations: count!(read_relocation, length as usize) >>
@@ -421,7 +421,7 @@ pub struct NESelfLoadHeader {
 	pub load_app_seg_offset:   u32,
 }
 
-named!(pub read_selfload_header<NESelfLoadHeader>,
+named!(read_selfload_header<NESelfLoadHeader>,
 	do_parse!(
 		                       tag!("A0") >>
 		                       take!(2) >>     // reserved
@@ -498,7 +498,7 @@ impl<'a> NEResourcesIterator<'a> {
 		let offset_shift = LE::read_u16(table);
 		let mut iterator = NEResourcesIterator {
 			table,
-			index: 0,
+			index: 2,
 			offset_shift,
 			block_index: 0,
 			block_len: 0,
@@ -530,7 +530,7 @@ impl<'a> Iterator for NEResourcesIterator<'a> {
 			None
 		} else {
 			let (_, header) = read_resource(&self.table[self.index..], self.table, self.offset_shift).unwrap();
-			self.index += 8;
+			self.index += 12;
 			self.block_index += 1;
 			Some(header)
 		}
@@ -608,6 +608,22 @@ impl<'a> NEExecutable<'a> {
 			size += fixup_table_size;
 		}
 		Ok(&data[..size])
+	}
+
+	pub fn get_resource_table_alignment_shift(&self) -> Option<u16> {
+		if let Some(table) = self.get_resource_table_data() {
+			Some(LE::read_u16(table))
+		} else {
+			None
+		}
+	}
+
+	pub fn get_resource_table_data(&self) -> Option<&[u8]> {
+		if self.header.resource_table_offset == 0 {
+			None
+		} else {
+			Some(&self.raw_header[self.header.resource_table_offset as usize..])
+		}
 	}
 
 	pub fn iter_segments(&self) -> NESegmentsIterator {

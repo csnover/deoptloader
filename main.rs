@@ -96,16 +96,51 @@ impl<'a> OptUnpacker<'a> {
 		&self.copyright
 	}
 
+	pub fn unpack_all(&mut self) -> Result<(), Box<std::error::Error>> {
+		let size = self.unpack_boot_segment()?;
+		println!("Unpacked boot segment ({} bytes)", size);
+
+		for segment_number in 2..=self.ne.get_header().num_segments {
+			let size = self.unpack_normal_segment(segment_number)?;
+			println!("Unpacked segment {} ({} bytes)", segment_number, size);
+		}
+
+		let trailer_offset = match self.copy_resources() {
+			Some(offset) => offset,
+			None => {
+				let last_segment = self.ne.get_segment_header(self.ne.get_header().num_segments)?;
+				(last_segment.offset + last_segment.data_size) as usize
+			}
+		};
+
+		let input = self.ne.get_raw_data();
+
+		if trailer_offset != input.len() {
+			let trailer_output_offset = self.output.len();
+			self.output.extend_from_slice(&input[trailer_offset..]);
+			println!("Copied trailer ({} bytes)", self.output.len() - trailer_output_offset);
+
+			// HACK: This is Macromedia Director-specific
+			let director_offset = LE::read_u32(&input[input.len() - 4..]) as usize;
+			if director_offset >= trailer_offset && director_offset < input.len() {
+				let output_director_offset = trailer_output_offset + director_offset - trailer_offset;
+				let director_offset_offset = self.output.len() - 4;
+				LE::write_u32(&mut self.output[director_offset_offset..], output_director_offset as u32);
+				println!("Rewrote trailer offset");
+			}
+		}
+
+		Ok(())
+	}
+
 	pub fn unpack_boot_segment(&mut self) -> Result<usize, Box<std::error::Error>> {
 		let segment_header = self.ne.get_segment_header(1)?;
 		let segment_data = self.ne.get_segment_data(1)?;
 
-		// TODO: Eliminate this extra copy?
 		let input = {
 			let mut input: Vec<u8> = Vec::with_capacity(segment_header.alloc_size as usize);
 			input.extend_from_slice(segment_data);
 			input.resize(segment_header.alloc_size as usize, 0);
-			// TODO: Why is the last byte not being copied without the +1?
 			safemem::copy_over(
 				&mut input,
 				self.boot_code_offsets.copy_from_offset as usize,
@@ -138,7 +173,7 @@ impl<'a> OptUnpacker<'a> {
 			self.output.extend_from_slice(fixup_table);
 			decompressed_size += fixup_table.len();
 		}
-		decompressed_size += self.align_output();
+		decompressed_size += self.align_output(self.sector_alignment);
 		Ok(decompressed_size)
 	}
 
@@ -174,7 +209,7 @@ impl<'a> OptUnpacker<'a> {
 				}
 			}
 
-			total_size += self.align_output();
+			total_size += self.align_output(self.sector_alignment);
 			(num_relocations > 0, decompressed_size, total_size)
 		} else {
 			(false, 0, 0)
@@ -237,10 +272,51 @@ impl<'a> OptUnpacker<'a> {
 		LE::write_u16(&mut segment_table[6..], data.alloc_size as u16);
 	}
 
-	fn align_output(&mut self) -> usize {
-		let last_sector_size = self.output.len() % self.sector_alignment;
+	fn set_resource_offset(&mut self, mut resource_index: u16, alignment: usize, offset: usize) {
+		let table_offset = self.ne.get_header_offset() + self.ne.get_header().resource_table_offset as usize;
+		let mut resource_table = &mut self.output[table_offset + 2..];
+		loop {
+			let resources_in_block = LE::read_u16(&resource_table[2..]);
+			if resource_index < resources_in_block {
+				let resource = &mut resource_table[8 + resource_index as usize * 12..];
+				assert_eq!(offset % alignment, 0);
+				LE::write_u16(resource, (offset / alignment) as u16);
+				break;
+			} else {
+				resource_index -= resources_in_block;
+				resource_table = &mut resource_table[8 + resources_in_block as usize * 12..];
+			}
+		}
+	}
+
+	fn copy_resources(&mut self) -> Option<usize> {
+		if let Some(alignment_shift) = self.ne.get_resource_table_alignment_shift() {
+			let alignment = 1 << alignment_shift;
+			self.align_output(alignment);
+			let input = self.ne.get_raw_data();
+
+			let mut trailer_offset = 0;
+			for (index, resource) in self.ne.iter_resources().enumerate() {
+				let new_resource_start = self.output.len();
+				let end_offset = resource.offset + resource.length;
+				self.output.extend_from_slice(&input[resource.offset as usize..end_offset as usize]);
+				self.align_output(alignment);
+				self.set_resource_offset(index as u16, alignment, new_resource_start);
+				if trailer_offset < end_offset {
+					trailer_offset = end_offset;
+				}
+				println!("Copied resource {} ({} bytes)", index + 1, resource.length);
+			}
+			Some(trailer_offset as usize)
+		} else {
+			None
+		}
+	}
+
+	fn align_output(&mut self, alignment: usize) -> usize {
+		let last_sector_size = self.output.len() % alignment;
 		if last_sector_size != 0 {
-			let padding_bytes = self.sector_alignment - last_sector_size;
+			let padding_bytes = alignment - last_sector_size;
 			self.output.resize(self.output.len() + padding_bytes as usize, 0);
 			padding_bytes
 		} else {
@@ -268,19 +344,10 @@ fn fix_file(in_filename: &str, out_filename: &str) -> Result<(usize, usize), Box
 	println!("Unpacking {}", name);
 	println!("{}", unpacker.get_copyright());
 
-	let size = unpacker.unpack_boot_segment()?;
-	println!("Unpacked boot segment ({} bytes)", size);
-
-	for segment_number in 2..=executable.get_header().num_segments {
-		let size = unpacker.unpack_normal_segment(segment_number)?;
-		println!("Unpacked segment {} ({} bytes)", segment_number, size);
-	}
+	unpacker.unpack_all()?;
 
 	// TODO:
 	// - Clear selfload flag
-	// - Rewrite resource table and copy resources
-	// - Copy executable trailer data
-	// - Rewrite offset to trailer data
 
 	unpacker.write_to_file(out_filename)
 }
