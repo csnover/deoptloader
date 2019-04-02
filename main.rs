@@ -54,11 +54,10 @@ named_args!(get_offsets(code_size: u16)<OptOffsets>,
 struct OptUnpacker<'a> {
 	ne:                &'a NEExecutable<'a>,
 	output:            Vec<u8>,
-	// segment_table:     &'a [u8],
-	// resource_table:    &'a [u8],
 	copyright:         String,
 	boot_code_offsets: OptOffsets,
 	sector_alignment:  usize,
+	debug: bool,
 }
 
 impl<'a> OptUnpacker<'a> {
@@ -90,7 +89,8 @@ impl<'a> OptUnpacker<'a> {
 			output,
 			copyright,
 			boot_code_offsets,
-			sector_alignment: 1 << ne.get_header().alignment_shift_count
+			sector_alignment: 1 << ne.get_header().alignment_shift_count,
+			debug: false
 		})
 	}
 
@@ -102,8 +102,8 @@ impl<'a> OptUnpacker<'a> {
 		let segment_header = self.ne.get_segment_header(1)?;
 		let segment_data = self.ne.get_segment_data(1)?;
 
-		// TODO: Remember why this is needed and think about if it is actually
-		// so.
+		// TODO: Replace this with writing the input to self.output since that
+		// seems to be necessary
 		let input = {
 			let mut input: Vec<u8> = Vec::with_capacity(segment_header.alloc_size as usize);
 			input.extend_from_slice(segment_data);
@@ -122,7 +122,7 @@ impl<'a> OptUnpacker<'a> {
 
 		let output_segment_offset = self.output.len();
 		let max_needed_size = output_segment_offset + segment_header.alloc_size as usize;
-		self.output.extend_from_slice(&input[..output_offset]);
+		self.output.extend_from_slice(&input);
 		self.output.resize(max_needed_size, 0);
 
 		let (_, mut decompressed_size) = self.run_decompressor(&input, input_offset, output_segment_offset + output_offset)?;
@@ -149,48 +149,51 @@ impl<'a> OptUnpacker<'a> {
 		let segment_header = self.ne.get_segment_header(segment_number)?;
 		let segment_data = self.ne.get_segment_data(segment_number)?;
 
-		let num_relocations = LE::read_u16(segment_data);
-
 		let output_segment_offset = self.output.len();
 
-		let misalignment = segment_header.offset % 512;
-		let aligned_offset = (segment_header.offset - misalignment) as usize;
-		let aligned_input = &self.ne.get_raw_data()[aligned_offset..aligned_offset + segment_data.len() + misalignment as usize];
+		let (has_relocations, data_size) = if segment_header.data_size > 0 {
+			let num_relocations = LE::read_u16(segment_data);
+			let extra_data = segment_header.offset % 512;
+			let aligned_offset = (segment_header.offset - extra_data) as usize;
+			let aligned_input = &self.ne.get_raw_data()[aligned_offset..aligned_offset + segment_data.len() + extra_data as usize];
 
-		let max_needed_size = self.output.len() + segment_header.alloc_size as usize;
-		self.output.extend_from_slice(aligned_input);
-		if max_needed_size > self.output.len() {
-			self.output.resize(max_needed_size, 0);
-		}
+			let max_needed_size = output_segment_offset + segment_header.alloc_size as usize;
+			self.output.extend_from_slice(aligned_input);
+			if max_needed_size > self.output.len() {
+				self.output.resize(max_needed_size, 0);
+			}
 
-		let (relocations_offset, mut decompressed_size) = self.run_decompressor(segment_data, 2, output_segment_offset)?;
-		self.output.resize(output_segment_offset + decompressed_size as usize, 0);
+			self.debug = true;
+			let (relocations_offset, mut decompressed_size) = self.run_decompressor(segment_data, 2, output_segment_offset)?;
+			self.output.resize(output_segment_offset + decompressed_size as usize, 0);
+
+			if num_relocations > 0 {
+				self.output.extend_from_slice(&[ (num_relocations & 0xff) as u8, (num_relocations >> 8 & 0xff) as u8 ]);
+				decompressed_size += 2;
+				let converter = FixupConverter::new(&segment_data[relocations_offset..], num_relocations);
+				for fixup in converter {
+					self.output.extend_from_slice(&fixup);
+					decompressed_size += fixup.len();
+				}
+			}
+
+			decompressed_size += self.align_output();
+			(num_relocations > 0, decompressed_size)
+		} else {
+			(false, 0)
+		};
 
 		let new_segment_header = {
 			let mut header = segment_header.clone();
 			header.offset = output_segment_offset as u32;
-			header.data_size = decompressed_size as u32;
-
-			if num_relocations > 0 {
+			header.data_size = data_size as u32;
+			if has_relocations {
 				header.flags |= NESegmentFlags::HAS_RELOC;
 			}
-
 			header
 		};
 		self.set_segment_table_entry(segment_number, new_segment_header);
-
-		if num_relocations > 0 {
-			self.output.extend_from_slice(&[ (num_relocations & 0xff) as u8, (num_relocations >> 8 & 0xff) as u8 ]);
-			decompressed_size += 2;
-			let converter = FixupConverter::new(&segment_data[relocations_offset..], num_relocations);
-			for fixup in converter {
-				self.output.extend_from_slice(&fixup);
-				decompressed_size += fixup.len();
-			}
-		}
-
-		decompressed_size += self.align_output();
-		Ok(decompressed_size)
+		Ok(data_size)
 	}
 
 	fn run_decompressor(&mut self, input: &[u8], input_offset: usize, output_offset: usize) -> Result<(usize, usize), Error> {
@@ -199,7 +202,6 @@ impl<'a> OptUnpacker<'a> {
 
 		loop {
 			let op = decompressor.next_op()?;
-			//println!("{:x?}", op);
 			match op {
 				Op::Noop => {
 					continue;
@@ -212,7 +214,9 @@ impl<'a> OptUnpacker<'a> {
 					return Ok((input_offset + input_index, output_index - output_offset));
 				},
 				Op::CopyBytes{ offset, count } => {
-					safemem::copy_over(&mut self.output, output_index - (offset as usize) - 1, output_index, count.into());
+					for i in 0..count {
+						self.output[output_index + i as usize] = self.output[output_index - (offset as usize) - 1 + i as usize];
+					}
 					output_index += count as usize;
 				}
 			}
