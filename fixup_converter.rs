@@ -43,7 +43,7 @@ impl<'a> FixupConverter<'a> {
 
 		if operation == 0xf0 {
 			self.group_kind = GroupKind::ZeroOffsetInternalRef;
-			self.group_source_kind = SourceKind::Segment;
+			self.group_source_kind = SourceKind::Offset;
 			self.input = &self.input[2..];
 		} else {
 			self.group_source_kind = match operation & 3 {
