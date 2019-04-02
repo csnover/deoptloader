@@ -151,7 +151,7 @@ impl<'a> OptUnpacker<'a> {
 
 		let output_segment_offset = self.output.len();
 
-		let (has_relocations, data_size) = if segment_header.data_size > 0 {
+		let (has_relocations, code_size, total_size) = if segment_header.data_size > 0 {
 			let num_relocations = LE::read_u16(segment_data);
 			let extra_data = segment_header.offset % 512;
 			let aligned_offset = (segment_header.offset - extra_data) as usize;
@@ -163,37 +163,37 @@ impl<'a> OptUnpacker<'a> {
 				self.output.resize(max_needed_size, 0);
 			}
 
-			self.debug = true;
-			let (relocations_offset, mut decompressed_size) = self.run_decompressor(segment_data, 2, output_segment_offset)?;
+			let (relocations_offset, decompressed_size) = self.run_decompressor(segment_data, 2, output_segment_offset)?;
 			self.output.resize(output_segment_offset + decompressed_size as usize, 0);
 
+			let mut total_size = decompressed_size;
 			if num_relocations > 0 {
 				self.output.extend_from_slice(&[ (num_relocations & 0xff) as u8, (num_relocations >> 8 & 0xff) as u8 ]);
-				decompressed_size += 2;
+				total_size += 2;
 				let converter = FixupConverter::new(&segment_data[relocations_offset..], num_relocations);
 				for fixup in converter {
 					self.output.extend_from_slice(&fixup);
-					decompressed_size += fixup.len();
+					total_size += fixup.len();
 				}
 			}
 
-			decompressed_size += self.align_output();
-			(num_relocations > 0, decompressed_size)
+			total_size += self.align_output();
+			(num_relocations > 0, decompressed_size, total_size)
 		} else {
-			(false, 0)
+			(false, 0, 0)
 		};
 
 		let new_segment_header = {
 			let mut header = segment_header.clone();
 			header.offset = output_segment_offset as u32;
-			header.data_size = data_size as u32;
+			header.data_size = code_size as u32;
 			if has_relocations {
 				header.flags |= NESegmentFlags::HAS_RELOC;
 			}
 			header
 		};
 		self.set_segment_table_entry(segment_number, new_segment_header);
-		Ok(data_size)
+		Ok(total_size)
 	}
 
 	fn run_decompressor(&mut self, input: &[u8], input_offset: usize, output_offset: usize) -> Result<(usize, usize), Error> {
