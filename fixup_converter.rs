@@ -1,7 +1,6 @@
 use byteorder::{ByteOrder, LE};
 use crate::err;
 use crate::neexe::NESegmentRelocationSourceKind as SourceKind;
-use enum_primitive::FromPrimitive;
 use std::io::Error;
 
 #[derive(Debug)]

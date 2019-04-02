@@ -57,7 +57,6 @@ struct OptUnpacker<'a> {
 	copyright:         String,
 	boot_code_offsets: OptOffsets,
 	sector_alignment:  usize,
-	debug: bool,
 }
 
 impl<'a> OptUnpacker<'a> {
@@ -90,7 +89,6 @@ impl<'a> OptUnpacker<'a> {
 			copyright,
 			boot_code_offsets,
 			sector_alignment: 1 << ne.get_header().alignment_shift_count,
-			debug: false
 		})
 	}
 
@@ -102,8 +100,7 @@ impl<'a> OptUnpacker<'a> {
 		let segment_header = self.ne.get_segment_header(1)?;
 		let segment_data = self.ne.get_segment_data(1)?;
 
-		// TODO: Replace this with writing the input to self.output since that
-		// seems to be necessary
+		// TODO: Eliminate this extra copy?
 		let input = {
 			let mut input: Vec<u8> = Vec::with_capacity(segment_header.alloc_size as usize);
 			input.extend_from_slice(segment_data);
@@ -233,12 +230,11 @@ impl<'a> OptUnpacker<'a> {
 		let offset = self.ne.get_header_offset() + ne_header.segment_table_offset as usize;
 
 		let segment_table = &mut self.output[(offset + ((segment_number - 1) * 8) as usize) as usize..];
+		assert_eq!((data.offset % self.sector_alignment as u32), 0);
 		LE::write_u16(segment_table, (data.offset / self.sector_alignment as u32) as u16);
 		LE::write_u16(&mut segment_table[2..], data.data_size as u16);
 		LE::write_u16(&mut segment_table[4..], data.flags.bits());
 		LE::write_u16(&mut segment_table[6..], data.alloc_size as u16);
-
-		println!("Segment {}: {:#?}", segment_number, &data);
 	}
 
 	fn align_output(&mut self) -> usize {
@@ -282,12 +278,7 @@ fn fix_file(in_filename: &str, out_filename: &str) -> Result<(usize, usize), Box
 
 	// TODO:
 	// - Clear selfload flag
-	// - Rewrite segment table
-	// - Rewrite resource table
-	// - For each segment:
-	//   - Decompress code into new code segment
-	//   - Copy reloc trailer, if it exists
-	//   - Add alignment padding
+	// - Rewrite resource table and copy resources
 	// - Copy executable trailer data
 	// - Rewrite offset to trailer data
 
@@ -308,10 +299,10 @@ fn main() {
 
 	match fix_file(&in_filename, &out_filename) {
 		Ok((in_size, out_size)) => {
-			println!("Successfully unpacked {} to {} ({} -> {} bytes)", &in_filename, &out_filename, in_size, out_size);
+			println!("Successfully unpacked {} to {} ({} -> {} bytes)", in_filename, out_filename, in_size, out_size);
 		},
 		Err(e) => {
-			println!("Failed to unpack {}: {}", &in_filename, &e);
+			println!("Failed to unpack {}: {}", in_filename, e);
 			std::process::exit(1);
 		}
 	};
