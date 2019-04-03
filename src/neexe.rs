@@ -1,10 +1,23 @@
 use bitflags::bitflags;
 use byteorder::{ByteOrder, LE};
+use custom_error::custom_error;
 use crate::util::read_pascal_string;
-use crate::{err, try_parse};
 use enum_primitive::*;
 use nom::{apply, count, do_parse, le_u8, le_u16, le_u32, many_till, named, named_args, switch, tag, take, value};
-use std::io::Error;
+
+macro_rules! try_parse (
+	($result: expr, $error: expr) => (match $result {
+		Ok((_, result)) => result,
+		Err(_) => { return Err($error); }
+	})
+);
+
+custom_error!{pub ParseError
+	NotMZ                                = "invalid MZ header",
+	NotNE                                = "invalid NE header",
+	SegmentHeader{ segment_number: u16 } = "invalid segment {segment_number} header",
+	SelfLoadHeader                       = "invalid self-load header"
+}
 
 named!(get_ne_offset<u16>,
 	do_parse!(
@@ -243,7 +256,7 @@ fn convert_resource_kind(resource_table: &[u8], kind: u16) -> NEResourceKind {
 	}
 }
 
-named_args!(pub read_resource<'a>(resource_table: &'a [u8], offset_shift: u16)<NEResourceEntry>,
+named_args!(read_resource<'a>(resource_table: &'a [u8], offset_shift: u16)<NEResourceEntry>,
 	do_parse!(
 		offset:        le_u16 >> // in sectors
 		length:        le_u16 >> // in sectors
@@ -263,7 +276,7 @@ named_args!(pub read_resource<'a>(resource_table: &'a [u8], offset_shift: u16)<N
 	)
 );
 
-named_args!(pub read_resource_kind<'a>(resource_table: &'a [u8], offset_shift: u16)<NEResourceKindEntry>,
+named_args!(read_resource_kind<'a>(resource_table: &'a [u8], offset_shift: u16)<NEResourceKindEntry>,
 	do_parse!(
 		kind:          le_u16 >>
 		num_resources: le_u16 >>
@@ -276,7 +289,7 @@ named_args!(pub read_resource_kind<'a>(resource_table: &'a [u8], offset_shift: u
 	)
 );
 
-pub fn get_resource_table(input: &[u8]) -> nom::IResult<&[u8], NEResourceTable> {
+fn get_resource_table(input: &[u8]) -> nom::IResult<&[u8], NEResourceTable> {
 	do_parse!(input,
 		alignment_shift_count: le_u16 >>
 		resource_kinds:        many_till!(apply!(read_resource_kind, input, alignment_shift_count), tag!("\0\0")) >>
@@ -447,8 +460,8 @@ pub struct NEExecutable<'a> {
 	input:         &'a [u8],
 	header:        NEHeader,
 	header_offset: u16,
-	/// A raw header slice is stored to make it easier to resolve offsets which
-	/// are relative to the start of the NE header
+	// A raw header slice is stored to make it easier to resolve offsets which
+	// are relative to the start of the NE header
 	raw_header:    &'a [u8],
 }
 
@@ -538,10 +551,10 @@ impl<'a> Iterator for NEResourcesIterator<'a> {
 }
 
 impl<'a> NEExecutable<'a> {
-	pub fn new(input: &'a [u8]) -> Result<Self, Error> {
-		let header_offset = try_parse!(get_ne_offset(input), "Not a valid MZ executable");
+	pub fn new(input: &'a [u8]) -> Result<Self, ParseError> {
+		let header_offset = try_parse!(get_ne_offset(input), ParseError::NotMZ);
 		let raw_header = &input[header_offset as usize..];
-		let header = try_parse!(read_ne_header(raw_header), "Not a valid NE executable");
+		let header = try_parse!(read_ne_header(raw_header), ParseError::NotNE);
 
 		Ok(NEExecutable {
 			input,
@@ -559,14 +572,14 @@ impl<'a> NEExecutable<'a> {
 		self.header_offset as usize
 	}
 
-	pub fn get_name(&self) -> Result<Option<String>, String> {
+	pub fn get_name(&self) -> Option<String> {
 		if self.header.non_resident_table_size == 0 {
-			Ok(None)
+			None
 		} else {
 			let ne_non_resident_table = &self.input[self.header.non_resident_table_offset as usize..];
 			match read_pascal_string(&ne_non_resident_table) {
-				Ok((_, name)) => Ok(Some(name)),
-				Err(error) => Err(format!("Error reading executable name: {}", error))
+				Ok((_, name)) => Some(name),
+				Err(_) => None
 			}
 		}
 	}
@@ -575,7 +588,7 @@ impl<'a> NEExecutable<'a> {
 		&self.header
 	}
 
-	pub fn get_selfload_header(&self) -> Result<Option<(NESelfLoadHeader, &[u8])>, String> {
+	pub fn get_selfload_header(&self) -> Result<Option<(NESelfLoadHeader, &[u8])>, ParseError> {
 		if self.header.flags.contains(NEFlags::SELF_LOAD) {
 			Ok(Some(self.get_selfload_header_impl()?))
 		} else {
@@ -585,21 +598,18 @@ impl<'a> NEExecutable<'a> {
 
 	/// # Arguments
 	/// * segment_number - 1-indexed segment number
-	pub fn get_segment_header(&self, segment_number: u16) -> Result<NESegmentEntry, String> {
-		if segment_number == 0 || segment_number > self.header.num_segments {
-			Err(format!("Bad segment number: {}", segment_number))
-		} else {
-			let offset = self.header.segment_table_offset + ((segment_number - 1) * SEGMENT_HEADER_SIZE);
-			match read_segment_header(&self.raw_header[offset as usize..], self.header.alignment_shift_count) {
-				Ok(result) => Ok(result.1),
-				Err(error) => Err(format!("Error reading segment {} header: {}", segment_number, error))
-			}
+	pub fn get_segment_header(&self, segment_number: u16) -> Result<NESegmentEntry, ParseError> {
+		assert!(segment_number != 0 || segment_number <= self.header.num_segments, format!("segment number {} is out of range", segment_number));
+		let offset = self.header.segment_table_offset + ((segment_number - 1) * SEGMENT_HEADER_SIZE);
+		match read_segment_header(&self.raw_header[offset as usize..], self.header.alignment_shift_count) {
+			Ok((_, header)) => Ok(header),
+			Err(_) => Err(ParseError::SegmentHeader{ segment_number })
 		}
 	}
 
 	/// # Arguments
 	/// * segment_number - 1-indexed segment number
-	pub fn get_segment_data(&self, segment_number: u16) -> Result<&[u8], String> {
+	pub fn get_segment_data(&self, segment_number: u16) -> Result<&[u8], ParseError> {
 		let header = self.get_segment_header(segment_number)?;
 		let data = &self.input[header.offset as usize..];
 		let mut size = header.data_size as usize;
@@ -634,11 +644,11 @@ impl<'a> NEExecutable<'a> {
 		NEResourcesIterator::new(&self.raw_header[self.header.resource_table_offset as usize..])
 	}
 
-	fn get_selfload_header_impl(&self) -> Result<(NESelfLoadHeader, &[u8]), String> {
+	fn get_selfload_header_impl(&self) -> Result<(NESelfLoadHeader, &[u8]), ParseError> {
 		let segment_data = self.get_segment_data(1)?;
 		match read_selfload_header(segment_data) {
 			Ok(header) => Ok((header.1, header.0)),
-			Err(error) => Err(format!("Error reading self-load header: {}", error))
+			Err(_) => Err(ParseError::SelfLoadHeader)
 		}
 	}
 }

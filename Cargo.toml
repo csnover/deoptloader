@@ -8,6 +8,7 @@ license = "Apache-2.0"
 [dependencies]
 bitflags = "1"
 byteorder = "1"
+custom_error = "1"
 encoding = "0.2"
 enum_primitive = "0.1"
 nom = "4"
@@ -16,4 +17,4 @@ safemem = "0.3"
 
 [[bin]]
 name = "deoptloader"
-path = "main.rs"
+path = "src/main.rs"

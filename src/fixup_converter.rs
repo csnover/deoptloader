@@ -1,7 +1,11 @@
 use byteorder::{ByteOrder, LE};
-use crate::err;
+use custom_error::custom_error;
 use crate::neexe::NESegmentRelocationSourceKind as SourceKind;
-use std::io::Error;
+
+custom_error!{Error
+	TooBigGroup{ group_count: u8, total_count: u16 } = "more fixups in record group ({group_count}) than total number of remaining fixups ({total_count})",
+	BadOSFixup{ kind: u16 }                          = "invalid OSFixup type {kind}"
+}
 
 #[derive(Debug)]
 enum GroupKind {
@@ -11,6 +15,7 @@ enum GroupKind {
 	OsFixup     { flags: u8, kind:    u16, },
 }
 
+#[derive(Debug)]
 pub struct FixupConverter<'a> {
 	input:             &'a [u8],
 	total_count:       u16,
@@ -35,7 +40,9 @@ impl<'a> FixupConverter<'a> {
 		self.group_count = self.input[1];
 
 		if self.group_count as u16 > self.total_count {
-			err!("More relocations in relocation record group than total number of relocations");
+			return Err(Error::TooBigGroup{
+				group_count: self.group_count, total_count: self.total_count
+			});
 		}
 
 		self.total_count -= self.group_count as u16;
@@ -73,7 +80,7 @@ impl<'a> FixupConverter<'a> {
 						flags: 3 + additive,
 						kind:  match LE::read_u16(&self.input[2..]) {
 							kind @ 1...6 => kind,
-							kind => panic!("Invalid OsFixup type {}", kind)
+							kind => { return Err(Error::BadOSFixup{ kind }); }
 						}
 					};
 					self.input = &self.input[4..];

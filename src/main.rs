@@ -6,13 +6,15 @@ mod neexe;
 #[macro_use] mod util;
 
 use byteorder::{ByteOrder, LittleEndian as LE};
-use decompressor::{Decompressor, Op};
+use custom_error::custom_error;
+use decompressor::{Decompressor, Error as DecompressorError, Op};
 use fixup_converter::FixupConverter;
 use neexe::*;
 use nom::{do_parse, le_u16, named, named_args, tag, take_until, take_until_and_consume};
 use std::io::prelude::*;
-use std::io::Error;
+use std::io;
 use std::fs::File;
+use std::error::Error as StdError;
 
 named!(detect_optloader<String>,
 	do_parse!(
@@ -51,6 +53,12 @@ named_args!(get_offsets(code_size: u16)<OptOffsets>,
 	)
 );
 
+custom_error!{OptError
+	NotSelfLoading     = "not a self-loading executable",
+	MissingBootOffsets = "missing boot offsets",
+	MissingCopyright   = "missing copyright string"
+}
+
 struct OptUnpacker<'a> {
 	ne:                &'a NEExecutable<'a>,
 	output:            Vec<u8>,
@@ -60,10 +68,10 @@ struct OptUnpacker<'a> {
 }
 
 impl<'a> OptUnpacker<'a> {
-	pub fn new(ne: &'a NEExecutable) -> Result<Self, String> {
+	pub fn new(ne: &'a NEExecutable) -> Result<Self, Box<dyn StdError>> {
 		let (header, boot_code_size) = match ne.get_selfload_header()? {
 			Some((header, extra_header_data)) => (header, LE::read_u16(&extra_header_data[6..])),
-			None => { return Err("Not a self-loading executable".to_string()); }
+			None => { return Err(Box::new(OptError::NotSelfLoading)); }
 		};
 
 		let (copyright, boot_code_offsets) = {
@@ -72,10 +80,10 @@ impl<'a> OptUnpacker<'a> {
 				Ok((boot_init_code, copyright)) => {
 					(copyright, match get_offsets(boot_init_code, boot_code_size) {
 						Ok((_, offsets)) => offsets,
-						Err(_) => { return Err("Could not find OPTLOADER boot offsets".to_string()); }
+						Err(_) => { return Err(Box::new(OptError::MissingBootOffsets)); }
 					})
 				},
-				Err(_) => { return Err("Could not find OPTLOADER copyright".to_string()); }
+				Err(_) => { return Err(Box::new(OptError::MissingCopyright)); }
 			}
 		};
 
@@ -96,7 +104,7 @@ impl<'a> OptUnpacker<'a> {
 		&self.copyright
 	}
 
-	pub fn unpack_all(&mut self) -> Result<(), Box<std::error::Error>> {
+	pub fn unpack_all(&mut self) -> Result<(), Box<dyn StdError>> {
 		let size = self.unpack_boot_segment()?;
 		println!("Unpacked boot segment ({} bytes)", size);
 
@@ -133,7 +141,7 @@ impl<'a> OptUnpacker<'a> {
 		Ok(())
 	}
 
-	pub fn unpack_boot_segment(&mut self) -> Result<usize, Box<std::error::Error>> {
+	pub fn unpack_boot_segment(&mut self) -> Result<usize, Box<dyn StdError>> {
 		let segment_header = self.ne.get_segment_header(1)?;
 		let segment_data = self.ne.get_segment_data(1)?;
 
@@ -177,7 +185,7 @@ impl<'a> OptUnpacker<'a> {
 		Ok(decompressed_size)
 	}
 
-	pub fn unpack_normal_segment(&mut self, segment_number: u16) -> Result<usize, Box<std::error::Error>> {
+	pub fn unpack_normal_segment(&mut self, segment_number: u16) -> Result<usize, Box<dyn StdError>> {
 		let segment_header = self.ne.get_segment_header(segment_number)?;
 		let segment_data = self.ne.get_segment_data(segment_number)?;
 
@@ -228,7 +236,7 @@ impl<'a> OptUnpacker<'a> {
 		Ok(total_size)
 	}
 
-	fn run_decompressor(&mut self, input: &[u8], input_offset: usize, output_offset: usize) -> Result<(usize, usize), Error> {
+	fn run_decompressor(&mut self, input: &[u8], input_offset: usize, output_offset: usize) -> Result<(usize, usize), DecompressorError> {
 		let mut decompressor = Decompressor::new(&input[input_offset..])?;
 		let mut output_index = output_offset;
 
@@ -255,7 +263,7 @@ impl<'a> OptUnpacker<'a> {
 		}
 	}
 
-	fn write_to_file(&self, filename: &str) -> Result<(usize, usize), Box<std::error::Error>> {
+	fn write_to_file(&self, filename: &str) -> Result<(usize, usize), io::Error> {
 		std::fs::write(filename, &self.output)?;
 		Ok((self.ne.get_raw_data().len(), self.output.len()))
 	}
@@ -325,7 +333,7 @@ impl<'a> OptUnpacker<'a> {
 	}
 }
 
-fn fix_file(in_filename: &str, out_filename: &str) -> Result<(usize, usize), Box<std::error::Error>> {
+fn fix_file(in_filename: &str, out_filename: &str) -> Result<(usize, usize), Box<dyn StdError>> {
 	let input = {
 		let mut file = File::open(&in_filename)?;
 		let mut input: Vec<u8> = Vec::with_capacity(file.metadata()?.len() as usize);
@@ -336,7 +344,7 @@ fn fix_file(in_filename: &str, out_filename: &str) -> Result<(usize, usize), Box
 	let executable = NEExecutable::new(&input)?;
 	let mut unpacker = OptUnpacker::new(&executable)?;
 
-	let name = match executable.get_name()? {
+	let name = match executable.get_name() {
 		Some(name) => name,
 		None => in_filename.to_string()
 	};
@@ -347,9 +355,10 @@ fn fix_file(in_filename: &str, out_filename: &str) -> Result<(usize, usize), Box
 	unpacker.unpack_all()?;
 
 	// TODO:
-	// - Clear selfload flag
+	// - Clear selfload flag to enable unpacked executables to execute
+	// - Delete the loader segment entirely?
 
-	unpacker.write_to_file(out_filename)
+	Ok(unpacker.write_to_file(out_filename)?)
 }
 
 fn main() {

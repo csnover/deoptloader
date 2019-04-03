@@ -1,5 +1,10 @@
 use byteorder::{ByteOrder, LittleEndian as LE};
-use std::io::{Error, ErrorKind};
+use custom_error::custom_error;
+
+custom_error!{pub Error
+	IncompleteCode{index: usize} = "premature end of code stream at {index}",
+	IncompleteData{index: usize} = "premature end of data stream at {index}"
+}
 
 #[derive(Debug)]
 pub enum Op {
@@ -9,16 +14,22 @@ pub enum Op {
 	Noop
 }
 
-pub struct Decompressor<'a> {
-	data:         &'a[u8],
+#[derive(Debug)]
+pub struct Decompressor<'data> {
+	data:         &'data[u8],
+	index:        usize,
 	instructions: u16,
 	count:        u8,
-	index:        usize,
 }
 
-impl<'a> Decompressor<'a> {
-	pub fn new(data: &'a [u8]) -> Result<Decompressor, Error> {
-		let mut decompressor = Decompressor { data, instructions: 0, count: 0, index: 0 };
+impl<'data> Decompressor<'data> {
+	pub fn new(data: &'data [u8]) -> Result<Decompressor, Error> {
+		let mut decompressor = Decompressor {
+			data,
+			index: 0,
+			instructions: 0,
+			count: 0,
+		};
 		decompressor.fetch_instructions()?;
 		Ok(decompressor)
 	}
@@ -26,7 +37,7 @@ impl<'a> Decompressor<'a> {
 	#[inline]
 	fn fetch_instructions(&mut self) -> Result<(), Error> {
 		if self.data.len() < 2 {
-			return Err(Error::new(ErrorKind::UnexpectedEof, "Ran out of instruction bits before end of stream"));
+			return Err(Error::IncompleteCode{ index: self.index });
 		}
 
 		self.instructions = LE::read_u16(&self.data);
@@ -61,7 +72,7 @@ impl<'a> Decompressor<'a> {
 	#[inline]
 	fn get_byte(&mut self) -> Result<u8, Error> {
 		if self.data.len() == 0 {
-			return Err(Error::new(ErrorKind::UnexpectedEof, "Ran out of data bytes before end of stream"))
+			return Err(Error::IncompleteData{ index: self.index });
 		}
 		let byte = self.data[0];
 		self.data = &self.data[1..];
@@ -70,24 +81,6 @@ impl<'a> Decompressor<'a> {
 	}
 
 	fn get_offset(&mut self) -> Result<u16, Error> {
-		// FIND_OFFSET
-		// 00 -> offset = 0, WRITE
-		// 010 -> offset = 1, WRITE
-		// 011 -> offset = 2 + read_bits(1), WRITE
-		// 100 -> offset = 4 + read_bits(2), WRITE
-		// 101 -> offset = 8 + read_bits(3), WRITE
-		// 110 -> offset = 16 + read_bits(4), WRITE
-		// 1110 -> offset = 32 + read_bits(4), WRITE
-		// 11110 -> offset = 48 + read_bits(4), WRITE
-		// 11111 -> offset = 64 + read_bits(6), WRITE
-
-		// WRITE
-		// offset = (offset << 8) | *(u8*)si++;
-		// ax = si;
-		// si = di-offset-1;
-		// while (count--) *(u8*)di++ = *(u8*)si++;
-		// si = ax;
-
 		Ok(((match self.get_bits(2)? {
 			0b00 => 0,
 			0b01 => match self.get_bit()? {
@@ -118,16 +111,6 @@ impl<'a> Decompressor<'a> {
 	}
 
 	pub fn next_op(&mut self) -> Result<Op, Error> {
-		// 1 -> *(u8*)di++ = *(u8*)si++; continue;
-		// 000 -> offset = 0, count = 2, WRITE
-		// 001 -> count = 3, FIND_OFFSET
-		// 0100 -> count = 4, FIND_OFFSET
-		// 0101 -> count = 5, FIND_OFFSET
-		// 01100 -> count = 6, FIND_OFFSET
-		// 01101 -> count = 7, FIND_OFFSET
-		// 01110 -> count = 8 + read_bits(2), FIND_OFFSET
-		// 011110 -> count = 12 + read_bits(3), FIND_OFFSET
-		// 011111 -> count = *(u8*)si++; if (count < 0x81) go FIND_OFFSET; else if (count != 0x81) break; else continue;
 		Ok(match self.get_bit()? {
 			0 => match self.get_bits(2)? {
 				0b00 => Op::CopyBytes{ count: 2, offset: self.get_byte()? as u16 },
