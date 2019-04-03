@@ -3,7 +3,7 @@ use byteorder::{ByteOrder, LE};
 use custom_error::custom_error;
 use crate::util::read_pascal_string;
 use enum_primitive::*;
-use nom::{apply, count, do_parse, le_u8, le_u16, le_u32, many_till, named, named_args, switch, tag, take, value};
+use nom::{apply, count, do_parse, le_u8, le_u16, le_u32, named, named_args, tag, take};
 
 macro_rules! try_parse (
 	($result: expr, $error: expr) => (match $result {
@@ -213,13 +213,6 @@ enum_from_primitive! {
 }
 
 #[derive(Clone, Debug)]
-pub enum NEResourceKind {
-	Predefined(NEPredefinedResourceKind),
-	Integer(u16),
-	String(String),
-}
-
-#[derive(Clone, Debug)]
 pub enum NEResourceId {
 	Integer(u16),
 	String(String),
@@ -231,29 +224,6 @@ pub struct NEResourceEntry {
 	pub length: u32, // bytes
 	pub flags:  NEResourceFlags,
 	pub id:     NEResourceId,
-}
-
-#[derive(Clone, Debug)]
-pub struct NEResourceKindEntry {
-	pub kind:      NEResourceKind,
-	pub resources: Vec<NEResourceEntry>,
-}
-
-#[derive(Clone, Debug)]
-pub struct NEResourceTable {
-	pub alignment_shift_count: u16,
-	pub resource_kinds: Vec<NEResourceKindEntry>,
-}
-
-fn convert_resource_kind(resource_table: &[u8], kind: u16) -> NEResourceKind {
-	if kind & 0x8000 == 0x8000 {
-		match NEPredefinedResourceKind::from_u16(kind & 0x7fff) {
-			Some(kind) => NEResourceKind::Predefined(kind),
-			None => NEResourceKind::Integer(kind & 0x7fff)
-		}
-	} else {
-		NEResourceKind::String(read_pascal_string(&resource_table[kind as usize..]).unwrap().1)
-	}
 }
 
 named_args!(read_resource<'a>(resource_table: &'a [u8], offset_shift: u16)<NEResourceEntry>,
@@ -276,79 +246,6 @@ named_args!(read_resource<'a>(resource_table: &'a [u8], offset_shift: u16)<NERes
 	)
 );
 
-named_args!(read_resource_kind<'a>(resource_table: &'a [u8], offset_shift: u16)<NEResourceKindEntry>,
-	do_parse!(
-		kind:          le_u16 >>
-		num_resources: le_u16 >>
-		/* reserved */ take!(4) >>
-		resources:     count!(apply!(read_resource, resource_table, offset_shift), num_resources as usize) >>
-		(NEResourceKindEntry {
-			kind: convert_resource_kind(resource_table, kind),
-			resources
-		})
-	)
-);
-
-fn get_resource_table(input: &[u8]) -> nom::IResult<&[u8], NEResourceTable> {
-	do_parse!(input,
-		alignment_shift_count: le_u16 >>
-		resource_kinds:        many_till!(apply!(read_resource_kind, input, alignment_shift_count), tag!("\0\0")) >>
-		(NEResourceTable {
-			alignment_shift_count,
-			resource_kinds: resource_kinds.0
-		})
-	)
-}
-
-bitflags!(pub struct NEEntryPointFlags: u8 {
-	const EXPORTED      = 1;
-	const MULTIPLE_DATA = 2;
-});
-
-#[derive(Clone, Debug)]
-pub enum NEEntryPoint {
-	None,
-	Movable{ flags: NEEntryPointFlags, dpmi_instruction: u16, segment: u8, offset: u16 },
-	Constant{ flags: NEEntryPointFlags, segment: u8, offset: u16 },
-}
-
-named!(read_entry_point_bundle<Vec<NEEntryPoint> >,
-	do_parse!(
-		count: le_u8 >>
-		entry_points: switch!(le_u8,
-			0    => count!(value!(NEEntryPoint::None), count as usize) |
-			0xff => count!(do_parse!(
-				flags:             le_u8 >>
-				dpmi_instruction:  le_u16 >>
-				segment:           le_u8 >>
-				offset:            le_u16 >>
-				(NEEntryPoint::Movable {
-					flags: NEEntryPointFlags::from_bits_truncate(flags),
-					dpmi_instruction,
-					segment,
-					offset
-				})
-			), count as usize) |
-			segment => count!(do_parse!(
-				flags:  le_u8 >>
-				offset: le_u16 >>
-				(NEEntryPoint::Constant {
-					flags: NEEntryPointFlags::from_bits_truncate(flags),
-					segment,
-					offset
-				})
-			), count as usize)
-		) >> (entry_points)
-	)
-);
-
-named!(pub get_entry_points<Vec<NEEntryPoint> >,
-	do_parse!(
-		results: many_till!(read_entry_point_bundle, tag!("\0")) >>
-		(results.0.into_iter().flatten().collect())
-	)
-);
-
 enum_from_primitive! {
 	#[derive(Clone, Debug)]
 	pub enum NESegmentRelocationSourceKind {
@@ -360,78 +257,9 @@ enum_from_primitive! {
 }
 
 #[derive(Clone, Debug)]
-pub enum NESegmentRelocationTarget {
-	InternalRef {
-		segment: u8,
-		offset:  u16,
-	},
-	ImportName {
-		module_index: u16,
-		name_offset:  u16, // into imported names table
-	},
-	ImportOrdinal {
-		module_index: u16,
-		ordinal:      u16,
-	},
-	OsFixup {
-		kind: u16,
-	}
-}
-
-#[derive(Clone, Debug)]
-pub struct NESegmentRelocation {
-	pub kind:     NESegmentRelocationSourceKind,
-	pub offset:   u16, // offset to source chain, bytes from start of segment
-	pub additive: bool,
-	pub target:   NESegmentRelocationTarget,
-}
-
-named!(read_relocation<NESegmentRelocation>,
-	do_parse!(
-		kind:   le_u8 >>
-		flags:  le_u8 >>
-		offset: le_u16 >>
-		data1:  le_u16 >>
-		data2:  le_u16 >>
-		(NESegmentRelocation {
-			kind: NESegmentRelocationSourceKind::from_u8(kind)
-					.expect(&format!("Unknown relocation type {}", kind)),
-			offset,
-			additive: (flags & 4) == 4,
-			target: match flags & 3 {
-				0 => NESegmentRelocationTarget::InternalRef {
-					segment: data1 as u8,
-					offset: data2
-				},
-				1 => NESegmentRelocationTarget::ImportOrdinal {
-					module_index: data1,
-					ordinal: data2
-				},
-				2 => NESegmentRelocationTarget::ImportName {
-					module_index: data1,
-					name_offset: data2
-				},
-				3 => NESegmentRelocationTarget::OsFixup {
-					kind: data1
-				},
-				_ => { panic!("Unknown relocation target {}", flags & 3); }
-			}
-		})
-	)
-);
-
-named!(read_relocations<Vec<NESegmentRelocation> >,
-	do_parse!(
-		length:      le_u16 >>
-		relocations: count!(read_relocation, length as usize) >>
-		(relocations)
-	)
-);
-
-#[derive(Clone, Debug)]
 pub struct NESelfLoadHeader {
-	pub boot_app_offset:       u32,
-	pub load_app_seg_offset:   u32,
+	pub boot_app_offset:     u32,
+	pub load_app_seg_offset: u32,
 }
 
 named!(read_selfload_header<NESelfLoadHeader>,
@@ -463,38 +291,6 @@ pub struct NEExecutable<'a> {
 	// A raw header slice is stored to make it easier to resolve offsets which
 	// are relative to the start of the NE header
 	raw_header:    &'a [u8],
-}
-
-pub struct NESegmentsIterator<'a> {
-	ne:    &'a NEExecutable<'a>,
-	index: u16,
-	len:   u16,
-}
-
-impl<'a> NESegmentsIterator<'a> {
-	pub fn new(ne: &'a NEExecutable) -> NESegmentsIterator<'a> {
-		NESegmentsIterator {
-			ne,
-			index: 0,
-			len: ne.get_header().num_segments
-		}
-	}
-}
-
-impl<'a> Iterator for NESegmentsIterator<'a> {
-	type Item = (NESegmentEntry, &'a [u8]);
-
-	fn next(&mut self) -> Option<Self::Item> {
-		if self.index < self.len {
-			self.index += 1;
-			Some((
-				self.ne.get_segment_header(self.index).unwrap(),
-				self.ne.get_segment_data(self.index).unwrap()
-			))
-		} else {
-			None
-		}
-	}
 }
 
 pub struct NEResourcesIterator<'a> {
@@ -634,10 +430,6 @@ impl<'a> NEExecutable<'a> {
 		} else {
 			Some(&self.raw_header[self.header.resource_table_offset as usize..])
 		}
-	}
-
-	pub fn iter_segments(&self) -> NESegmentsIterator {
-		NESegmentsIterator::new(&self)
 	}
 
 	pub fn iter_resources(&self) -> NEResourcesIterator {
