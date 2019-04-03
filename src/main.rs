@@ -105,6 +105,8 @@ impl<'a> OptUnpacker<'a> {
 	}
 
 	pub fn unpack_all(&mut self) -> Result<(), Box<dyn StdError>> {
+		// TODO: Delete the loader segment entirely instead? (It only needed
+		// to be unpacked to reverse engineer the loader itself.)
 		let size = self.unpack_boot_segment()?;
 		println!("Unpacked boot segment ({} bytes)", size);
 
@@ -137,6 +139,9 @@ impl<'a> OptUnpacker<'a> {
 				println!("Rewrote trailer offset");
 			}
 		}
+
+		self.clear_selfload_header();
+		println!("Removed self-loading header");
 
 		Ok(())
 	}
@@ -297,6 +302,11 @@ impl<'a> OptUnpacker<'a> {
 		}
 	}
 
+	fn clear_selfload_header(&mut self) {
+		let flags = self.ne.get_header().flags - NEFlags::SELF_LOAD;
+		LE::write_u16(&mut self.output[self.ne.get_header_offset() + 12..], flags.bits());
+	}
+
 	fn copy_resources(&mut self) -> Option<usize> {
 		if let Some(alignment_shift) = self.ne.get_resource_table_alignment_shift() {
 			let alignment = 1 << alignment_shift;
@@ -353,10 +363,6 @@ fn fix_file(in_filename: &str, out_filename: &str) -> Result<(usize, usize), Box
 	println!("{}", unpacker.get_copyright());
 
 	unpacker.unpack_all()?;
-
-	// TODO:
-	// - Clear selfload flag to enable unpacked executables to execute
-	// - Delete the loader segment entirely?
 
 	Ok(unpacker.write_to_file(out_filename)?)
 }

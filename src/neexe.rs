@@ -29,16 +29,23 @@ named!(get_ne_offset<u16>,
 );
 
 bitflags!(pub struct NEFlags: u16 {
-	const SINGLE_DATA   = 0x0001;
-	const MULTIPLE_DATA = 0x0002;
-	const WIN32S        = 0x0010;
-	const FULLSCREEN    = 0x0100;
-	const CONSOLE       = 0x0200;
-	const GUI           = 0x0300;
-	const SELF_LOAD     = 0x0800;
-	const LINKER_ERROR  = 0x2000;
-	const CALL_WEP      = 0x4000;
-	const LIB_MODULE    = 0x8000;
+	const SINGLE_DATA    = 0x0001;
+	const MULTIPLE_DATA  = 0x0002;
+	const GLOBAL_INIT    = 0x0004;
+	const PROTECTED_MODE = 0x0008;
+	// There seems to be some disagreement as to what these high nibble bits
+	// mean, but they are sometimes set so they should probably not be ignored
+	const WIN32S         = 0x0010;
+	const INST_286       = 0x0020;
+	const INST_386       = 0x0040;
+	const INST_X87       = 0x0080;
+	const FULLSCREEN     = 0x0100;
+	const CONSOLE        = 0x0200;
+	const GUI            = 0x0300;
+	const SELF_LOAD      = 0x0800;
+	const LINKER_ERROR   = 0x2000;
+	const CALL_WEP       = 0x4000;
+	const LIB_MODULE     = 0x8000;
 });
 
 #[derive(Clone, Debug)]
