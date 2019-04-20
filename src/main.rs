@@ -134,9 +134,20 @@ impl<'a> OptUnpacker<'a> {
 			let director_offset = LE::read_u32(&input[input.len() - 4..]) as usize;
 			if director_offset >= trailer_offset && director_offset < input.len() {
 				let output_director_offset = trailer_output_offset + director_offset - trailer_offset;
+
+				let delta = output_director_offset - director_offset;
+
 				let director_offset_offset = self.output.len() - 4;
 				LE::write_u32(&mut self.output[director_offset_offset..], output_director_offset as u32);
-				println!("Rewrote trailer offset");
+
+				let mut director_data_table = &mut self.output[output_director_offset + 4..];
+				for _ in 0..6 {
+					let offset = LE::read_u32(director_data_table) as usize + delta;
+					LE::write_u32(&mut director_data_table, offset as u32);
+					director_data_table = &mut director_data_table[4..];
+				}
+
+				println!("Rewrote Director trailer");
 			}
 		}
 
