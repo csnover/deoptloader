@@ -33,7 +33,7 @@ before_deploy:
 deploy:
   artifact: /.*\.zip/
   auth_token:
-    secure: mRP7OSzKiBwmmdR0yqfcsySUA3gD4HmbPkM2mWWg6BQnwbpwMMUISjbDOCsjh7kf
+    secure: XpPcJlXbKvXuHihbLYOwHeDElsgP7Up2ON2ACIXItFk9Axig8ewHC0SlVK8FOgGW
   description: ''
   on:
     appveyor_repo_tag: true
