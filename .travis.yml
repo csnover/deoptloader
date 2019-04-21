@@ -1,0 +1,39 @@
+# Based on the "trust" template v0.1.2
+# https://github.com/japaric/trust/tree/v0.1.2
+
+language: rust
+
+env:
+  global:
+    - CRATE_NAME=deoptloader
+
+os:
+  - linux
+  - osx
+
+script: >-
+  if test -z "$TRAVIS_TAG"; then
+    cargo test --verbose
+  else
+    cargo rustc --verbose --release -- -C lto
+  fi
+
+before_deploy:
+  - strip target/release/$CRATE_NAME
+  - tar -C target/release -czf $CRATE_NAME-$TRAVIS_TAG-$TRAVIS_OS_NAME.tar.gz $CRATE_NAME
+
+deploy:
+  api_key:
+    secure: "UtThonJbWC6ZzCzbwQjjr4vT+rKuqPscrD+Ujh0sQJQ06E/DavU/P0uieshWPDjKsUX5GNcpySql+TekL7Gn3sJoNKJioWO3YhGz7r0naSXlRM85jAucMjZwABkz7IjKJcGkf4Q6sbqT8eQeKES4VY/2K0TBxUxMte3K2VTKFNSbaqGWUm07/D8wV0nOMIYF00Ag/m78cc87E2yRo+rZPRDOfiInGhMHHxHx/7dG8Ei6zPln73hOWvDCvgd2vBBwXgiyRICoCI7vYiAQ82QQl951Q/iYbuFa/4VdrBbs6TAZ6PsEJL8+TchdwcS4fWqnXD61kJUR8Dr1/shEWQEwQvIRMeZ4ay323muB1lMPktPauiL4sFkDXpisocl27ze/EZfL/jSlpkDJ/qXgJBx0ujvPFow9tkrAEN+wYf9IORlT5IpRMjM86dhIA5RTtx+M/O4lfy+z2KRMlThjdwOY1nJbEHauGQlW8Y5FdnXBf4eScBzWDNjPjjAMZ4ZUrXuCsNUmYLIqRQsDRYMOSck+6jfdvxO/yvNISi/w0Etp3QTpoS+Lh3fzqjyFUG2od64RO9WDFFo89CMh1ROjxJTKoEtr4tl4blCzJz6eCnKweMLUXDmsUbFdIm3XelBWYK7+S14M7V17XTOw9KCOtpvFp1fw1m3OU7aalyCEemE40rY="
+  file: $CRATE_NAME-$TRAVIS_TAG-$TRAVIS_OS_NAME.tar.gz
+  on:
+    tags: true
+  provider: releases
+  skip_cleanup: true
+
+cache: cargo
+
+branches:
+  only:
+    - /^v\d+\.\d+\.\d+.*$/
+    - master
