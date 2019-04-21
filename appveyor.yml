@@ -26,8 +26,8 @@ test: false
 before_deploy:
   - cargo rustc --verbose --release -- -C lto
   - ps: >-
-      $ZIP = "$($Env:CRATE_NAME)-$($Env:APPVEYOR_REPO_TAG_NAME)-windows.zip"
-      7z a "$ZIP" ".\target\release\$($Env:CRATE_NAME).exe"
+      $ZIP = "$($Env:CRATE_NAME)-$($Env:APPVEYOR_REPO_TAG_NAME)-windows.zip";
+      7z a "$ZIP" ".\target\release\$($Env:CRATE_NAME).exe";
       Push-AppveyorArtifact "$ZIP"
 
 deploy:
