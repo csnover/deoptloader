@@ -2,6 +2,8 @@
 
 Unpacks OPTLOADER-packed 16-bit Windows executables.
 
+Plus free bonus executable for listing Win16 New Executable resources!
+
 ## Releases
 
 Prebuilt binaries for 64-bit Windows, macOS, and Linux are available from the
