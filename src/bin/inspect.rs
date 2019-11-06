@@ -1,3 +1,4 @@
+use deoptloader::*;
 use std::io::Read;
 
 fn main() {
@@ -14,7 +15,7 @@ fn main() {
 		data
 	};
 
-	let exe = deoptloader::neexe::NEExecutable::new(&data).unwrap();
+	let exe = neexe::NEExecutable::new(&data).unwrap();
 	if let Some(name) = exe.name() {
 		println!("{}", name);
 	}
@@ -24,5 +25,23 @@ fn main() {
 	println!("Resources:");
 	for resource in exe.iter_resources() {
 		println!("{:?}", resource);
+		if resource.kind == neexe::NEResourceKind::Predefined(neexe::NEPredefinedResourceKind::StringTable) {
+			println!("  Strings in table:");
+			let mut string_table = &exe.raw_data()[resource.offset as usize..(resource.offset + resource.length) as usize];
+			match resource.id {
+				neexe::NEResourceId::Integer(base_id) => {
+					let base_id = u32::from(base_id - 1) << 4;
+					for i in 0..16 {
+						let result = util::read_pascal_string(&string_table).unwrap();
+						string_table = result.0;
+						let value = result.1;
+						if !value.is_empty() {
+							println!("  {:5}: {}", base_id + i, value.replace('\r', "^r").replace('\n', "^n"));
+						}
+					}
+				},
+				_ => panic!()
+			};
+		}
 	}
 }

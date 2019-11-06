@@ -193,7 +193,7 @@ bitflags!(pub struct NEResourceFlags: u16 {
 });
 
 enum_from_primitive! {
-	#[derive(Clone, Debug)]
+	#[derive(Clone, Debug, PartialEq, Eq)]
 	pub enum NEPredefinedResourceKind {
 		Cursor           = 1,
 		Bitmap           = 2,
@@ -225,7 +225,7 @@ pub enum NEResourceId {
 	String(String),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NEResourceKind {
 	Predefined(NEPredefinedResourceKind),
 	Integer(u16),
