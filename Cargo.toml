@@ -15,3 +15,6 @@ enum_primitive = "0.1"
 nom = "4"
 num = "0.2"
 safemem = "0.3"
+
+[profile.release]
+lto = true

@@ -18,13 +18,13 @@ build_script:
   - if [%APPVEYOR_REPO_TAG%]==[false] (
       cargo test --verbose
     ) else (
-      cargo rustc --verbose --release -- -C lto
+      cargo rustc --verbose --release
     )
 
 test: false
 
 before_deploy:
-  - cargo rustc --verbose --release -- -C lto
+  - cargo rustc --verbose --release
   - ps: >-
       $ZIP = "$($Env:CRATE_NAME)-$($Env:APPVEYOR_REPO_TAG_NAME)-windows.zip";
       7z a "$ZIP" ".\target\release\$($Env:CRATE_NAME).exe";

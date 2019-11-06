@@ -15,7 +15,7 @@ script: >-
   if test -z "$TRAVIS_TAG"; then
     cargo test --verbose
   else
-    cargo rustc --verbose --release -- -C lto
+    cargo rustc --verbose --release
   fi
 
 before_deploy:
