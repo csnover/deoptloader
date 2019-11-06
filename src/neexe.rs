@@ -208,6 +208,8 @@ enum_from_primitive! {
 		MessageTable     = 11,
 		GroupCursor      = 12,
 		GroupIcon        = 14,
+		// NameTable: https://hackernoon.com/win3mu-part-5-windows-3-executable-files-c2affeec0e5
+		NameTable        = 15,
 		Version          = 16,
 		DlgInclude       = 17,
 		PlugPlay         = 19,
