@@ -1,6 +1,6 @@
 [package]
 name = "deoptloader"
-version = "0.1.0"
+version = "1.0.0"
 authors = ["Colin Snover <github.com@zetafleet.com>"]
 edition = "2018"
 license = "Apache-2.0"
@@ -14,7 +14,3 @@ enum_primitive = "0.1"
 nom = "4"
 num = "0.2"
 safemem = "0.3"
-
-[[bin]]
-name = "deoptloader"
-path = "src/main.rs"

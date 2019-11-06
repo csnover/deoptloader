@@ -1,15 +1,10 @@
 #![recursion_limit = "1024"]
 
-mod decompressor;
-mod fixup_converter;
-mod neexe;
-#[macro_use] mod util;
-
 use byteorder::{ByteOrder, LittleEndian as LE};
 use custom_error::custom_error;
-use decompressor::{Decompressor, Error as DecompressorError, Op};
-use fixup_converter::FixupConverter;
-use neexe::*;
+use deoptloader::decompressor::{Decompressor, Error as DecompressorError, Op};
+use deoptloader::fixup_converter::FixupConverter;
+use deoptloader::neexe::*;
 use nom::{do_parse, le_u16, named, named_args, tag, take_until, take_until_and_consume};
 use std::io::prelude::*;
 use std::io;
@@ -35,7 +30,7 @@ struct OptOffsets {
 
 const X86_MOV_SI: u8 = b'\xbe';
 const X86_MOV_DI: u8 = b'\xbf';
-named_args!(get_offsets(code_size: u16)<OptOffsets>,
+named_args!(parse_offsets(code_size: u16)<OptOffsets>,
 	do_parse!(
 		                      take_until_and_consume!(&[X86_MOV_SI][..]) >>
 		copy_from_offset:     le_u16 >>
@@ -69,16 +64,16 @@ struct OptUnpacker<'a> {
 
 impl<'a> OptUnpacker<'a> {
 	pub fn new(ne: &'a NEExecutable) -> Result<Self, Box<dyn StdError>> {
-		let (header, boot_code_size) = match ne.get_selfload_header()? {
+		let (header, boot_code_size) = match ne.selfload_header()? {
 			Some((header, extra_header_data)) => (header, LE::read_u16(&extra_header_data[6..])),
 			None => { return Err(Box::new(OptError::NotSelfLoading)); }
 		};
 
 		let (copyright, boot_code_offsets) = {
-			let boot_code = &ne.get_segment_data(1)?[(header.boot_app_offset & 0xffff) as usize..];
+			let boot_code = &ne.segment_data(1)?[(header.boot_app_offset & 0xffff) as usize..];
 			match detect_optloader(boot_code) {
 				Ok((boot_init_code, copyright)) => {
-					(copyright, match get_offsets(boot_init_code, boot_code_size) {
+					(copyright, match parse_offsets(boot_init_code, boot_code_size) {
 						Ok((_, offsets)) => offsets,
 						Err(_) => { return Err(Box::new(OptError::MissingBootOffsets)); }
 					})
@@ -87,20 +82,20 @@ impl<'a> OptUnpacker<'a> {
 			}
 		};
 
-		let mut output = Vec::with_capacity(ne.get_raw_data().len());
-		let header_size = ne.get_segment_header(1)?.offset as usize;
-		output.extend_from_slice(&ne.get_raw_data()[0..header_size]);
+		let mut output = Vec::with_capacity(ne.raw_data().len());
+		let header_size = ne.segment_header(1)?.offset as usize;
+		output.extend_from_slice(&ne.raw_data()[0..header_size]);
 
 		Ok(OptUnpacker {
 			ne,
 			output,
 			copyright,
 			boot_code_offsets,
-			sector_alignment: 1 << ne.get_header().alignment_shift_count,
+			sector_alignment: 1 << ne.header().alignment_shift_count,
 		})
 	}
 
-	pub fn get_copyright(&self) -> &String {
+	pub fn copyright(&self) -> &String {
 		&self.copyright
 	}
 
@@ -110,7 +105,7 @@ impl<'a> OptUnpacker<'a> {
 		let size = self.unpack_boot_segment()?;
 		println!("Unpacked boot segment ({} bytes)", size);
 
-		for segment_number in 2..=self.ne.get_header().num_segments {
+		for segment_number in 2..=self.ne.header().num_segments {
 			let size = self.unpack_normal_segment(segment_number)?;
 			println!("Unpacked segment {} ({} bytes)", segment_number, size);
 		}
@@ -118,12 +113,12 @@ impl<'a> OptUnpacker<'a> {
 		let trailer_offset = match self.copy_resources() {
 			Some(offset) => offset,
 			None => {
-				let last_segment = self.ne.get_segment_header(self.ne.get_header().num_segments)?;
+				let last_segment = self.ne.segment_header(self.ne.header().num_segments)?;
 				(last_segment.offset + last_segment.data_size) as usize
 			}
 		};
 
-		let input = self.ne.get_raw_data();
+		let input = self.ne.raw_data();
 
 		if trailer_offset != input.len() {
 			let trailer_output_offset = self.output.len();
@@ -158,8 +153,8 @@ impl<'a> OptUnpacker<'a> {
 	}
 
 	pub fn unpack_boot_segment(&mut self) -> Result<usize, Box<dyn StdError>> {
-		let segment_header = self.ne.get_segment_header(1)?;
-		let segment_data = self.ne.get_segment_data(1)?;
+		let segment_header = self.ne.segment_header(1)?;
+		let segment_data = self.ne.segment_data(1)?;
 
 		let input = {
 			let mut input: Vec<u8> = Vec::with_capacity(segment_header.alloc_size as usize);
@@ -202,8 +197,8 @@ impl<'a> OptUnpacker<'a> {
 	}
 
 	pub fn unpack_normal_segment(&mut self, segment_number: u16) -> Result<usize, Box<dyn StdError>> {
-		let segment_header = self.ne.get_segment_header(segment_number)?;
-		let segment_data = self.ne.get_segment_data(segment_number)?;
+		let segment_header = self.ne.segment_header(segment_number)?;
+		let segment_data = self.ne.segment_data(segment_number)?;
 
 		let output_segment_offset = self.output.len();
 
@@ -211,7 +206,7 @@ impl<'a> OptUnpacker<'a> {
 			let num_relocations = LE::read_u16(segment_data);
 			let extra_data = segment_header.offset % 512;
 			let aligned_offset = (segment_header.offset - extra_data) as usize;
-			let aligned_input = &self.ne.get_raw_data()[aligned_offset..aligned_offset + segment_data.len() + extra_data as usize];
+			let aligned_input = &self.ne.raw_data()[aligned_offset..aligned_offset + segment_data.len() + extra_data as usize];
 
 			let max_needed_size = output_segment_offset + segment_header.alloc_size as usize;
 			self.output.extend_from_slice(aligned_input);
@@ -281,12 +276,12 @@ impl<'a> OptUnpacker<'a> {
 
 	fn write_to_file(&self, filename: &str) -> Result<(usize, usize), io::Error> {
 		std::fs::write(filename, &self.output)?;
-		Ok((self.ne.get_raw_data().len(), self.output.len()))
+		Ok((self.ne.raw_data().len(), self.output.len()))
 	}
 
 	fn set_segment_table_entry(&mut self, segment_number: u16, data: NESegmentEntry) {
-		let ne_header = self.ne.get_header();
-		let offset = self.ne.get_header_offset() + ne_header.segment_table_offset as usize;
+		let ne_header = self.ne.header();
+		let offset = self.ne.header_offset() + ne_header.segment_table_offset as usize;
 
 		let segment_table = &mut self.output[(offset + ((segment_number - 1) * 8) as usize) as usize..];
 		assert_eq!((data.offset % self.sector_alignment as u32), 0);
@@ -297,7 +292,7 @@ impl<'a> OptUnpacker<'a> {
 	}
 
 	fn set_resource_offset(&mut self, mut resource_index: u16, alignment: usize, offset: usize) {
-		let table_offset = self.ne.get_header_offset() + self.ne.get_header().resource_table_offset as usize;
+		let table_offset = self.ne.header_offset() + self.ne.header().resource_table_offset as usize;
 		let mut resource_table = &mut self.output[table_offset + 2..];
 		loop {
 			let resources_in_block = LE::read_u16(&resource_table[2..]);
@@ -314,15 +309,15 @@ impl<'a> OptUnpacker<'a> {
 	}
 
 	fn clear_selfload_header(&mut self) {
-		let flags = self.ne.get_header().flags - NEFlags::SELF_LOAD;
-		LE::write_u16(&mut self.output[self.ne.get_header_offset() + 12..], flags.bits());
+		let flags = self.ne.header().flags - NEFlags::SELF_LOAD;
+		LE::write_u16(&mut self.output[self.ne.header_offset() + 12..], flags.bits());
 	}
 
 	fn copy_resources(&mut self) -> Option<usize> {
-		if let Some(alignment_shift) = self.ne.get_resource_table_alignment_shift() {
+		if let Some(alignment_shift) = self.ne.resource_table_alignment_shift() {
 			let alignment = 1 << alignment_shift;
 			self.align_output(alignment);
-			let input = self.ne.get_raw_data();
+			let input = self.ne.raw_data();
 
 			let mut trailer_offset = 0;
 			for (index, resource) in self.ne.iter_resources().enumerate() {
@@ -365,13 +360,13 @@ fn fix_file(in_filename: &str, out_filename: &str) -> Result<(usize, usize), Box
 	let executable = NEExecutable::new(&input)?;
 	let mut unpacker = OptUnpacker::new(&executable)?;
 
-	let name = match executable.get_name() {
+	let name = match executable.name() {
 		Some(name) => name,
 		None => in_filename.to_string()
 	};
 
 	println!("Unpacking {}", name);
-	println!("{}", unpacker.get_copyright());
+	println!("{}", unpacker.copyright());
 
 	unpacker.unpack_all()?;
 

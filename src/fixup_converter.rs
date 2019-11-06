@@ -39,13 +39,13 @@ impl<'a> FixupConverter<'a> {
 		let operation = self.input[0];
 		self.group_count = self.input[1];
 
-		if self.group_count as u16 > self.total_count {
+		if u16::from(self.group_count) > self.total_count {
 			return Err(Error::TooBigGroup{
 				group_count: self.group_count, total_count: self.total_count
 			});
 		}
 
-		self.total_count -= self.group_count as u16;
+		self.total_count -= u16::from(self.group_count);
 
 		if operation == 0xf0 {
 			self.group_kind = GroupKind::ZeroOffsetInternalRef;
@@ -68,7 +68,7 @@ impl<'a> FixupConverter<'a> {
 					};
 					self.input = &self.input[3..];
 				},
-				kind @ 1...2 => {
+				kind @ 1..=2 => {
 					self.group_kind = GroupKind::Import {
 						flags: kind + additive,
 						index: LE::read_u16(&self.input[2..])
@@ -79,7 +79,7 @@ impl<'a> FixupConverter<'a> {
 					self.group_kind = GroupKind::OsFixup {
 						flags: 3 + additive,
 						kind:  match LE::read_u16(&self.input[2..]) {
-							kind @ 1...6 => kind,
+							kind @ 1..=6 => kind,
 							kind => { return Err(Error::BadOSFixup{ kind }); }
 						}
 					};
@@ -98,7 +98,7 @@ impl<'a> Iterator for FixupConverter<'a> {
 	type Item = [u8; FIXUP_RECORD_SIZE];
 
 	fn next(&mut self) -> Option<Self::Item> {
-		if self.group_count == 0 && (self.total_count == 0 || !self.next_group().is_ok()) {
+		if self.group_count == 0 && (self.total_count == 0 || self.next_group().is_err()) {
 			return None;
 		}
 
