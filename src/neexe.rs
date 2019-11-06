@@ -455,15 +455,34 @@ impl<'a> NEExecutable<'a> {
 	}
 
 	pub fn resource_table_data(&self) -> Option<&[u8]> {
-		if self.header.resource_table_offset == 0 {
-			None
-		} else {
+		if self.has_resource_table() {
 			Some(&self.raw_header[self.header.resource_table_offset as usize..])
+		} else {
+			None
 		}
 	}
 
 	pub fn iter_resources(&self) -> NEResourcesIterator {
-		NEResourcesIterator::new(&self.raw_header[self.header.resource_table_offset as usize..])
+		if self.has_resource_table() {
+			NEResourcesIterator::new(&self.raw_header[self.header.resource_table_offset as usize..])
+		} else {
+			NEResourcesIterator {
+				table: self.raw_header,
+				index: 0,
+				table_kind: NEResourceKind::Integer(0xffff),
+				offset_shift: 0,
+				block_index: 1,
+				block_len: 0,
+				finished: true
+			}
+		}
+	}
+
+	pub fn has_resource_table(&self) -> bool {
+		// In DIRAPI.DLL from Director for Windows, the resource table offset
+		// is non-zero but there is no resource table; the resource table offset
+		// and names table offset are identical.
+		self.header.resource_table_offset != 0 && self.header.resource_table_offset != self.header.names_table_offset
 	}
 
 	fn selfload_header_impl(&self) -> Result<(NESelfLoadHeader, &[u8]), ParseError> {
